@@ -613,7 +613,9 @@ export class SchemeOps implements RemoteContextSchemeEngineAdapter {
              * that declares surfaces a `surface/view` address. Omitted, the
              * scheme's default format, or for a scheme that declares surfaces,
              * each surface the result writes in its default for the marking's
-             * role, so a part and a whole can come back in different views.
+             * role, so a part and a whole can come back in different views, or
+             * the one default that writes every other surface's scope beside
+             * its own, alone. A named output is written alone.
              */
             outputFormat?: string;
             /** The facts already chosen, settled together with `input`. */
@@ -1101,7 +1103,8 @@ export class SchemeOps implements RemoteContextSchemeEngineAdapter {
              * that declares surfaces a `surface/view` address. Omitted, the
              * scheme's default format, or for a scheme that declares surfaces,
              * each surface the result writes in its default for the marking's
-             * role.
+             * role, or the one default that writes every other surface's scope
+             * beside its own, alone. A named output is written alone.
              */
             outputFormat?: string;
             context?: ProcessingContext;
@@ -1164,7 +1167,9 @@ export class SchemeOps implements RemoteContextSchemeEngineAdapter {
              * for a scheme that declares surfaces a `surface/view` address.
              * Omitted, the scheme's default format, or for a scheme that
              * declares surfaces, each surface the result writes in its default
-             * for the marking's role.
+             * for the marking's role, or the one default that writes every
+             * other surface's scope beside its own, alone. A named output is
+             * written alone.
              */
             outputFormat?: string;
             /** The facts already chosen, settled together with `input`. */

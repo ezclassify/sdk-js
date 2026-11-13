@@ -115,7 +115,9 @@ the input is written in; leave it out and recognition works it out.
 get the scheme's default format. A scheme that declares surfaces names its
 outputs as `surface/view` addresses, such as `sensitivity/short`, and leaving
 `outputFormat` out writes each surface in its default for the marking's role,
-so a part and a whole can come back in different views. `surface` names which
+so a part and a whole can come back in different views, unless one default
+writes every other surface's scope beside its own, which is then written
+alone. An output you name is always written alone. `surface` names which
 of the scheme's scopes the input is, for a fragment such as a portion; leave it
 out and the input is a whole marking. Each operation takes only the ones its
 request declares, so `diff` has `inputFormat` alone and `suggestForCategories`
