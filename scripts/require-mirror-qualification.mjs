@@ -4,8 +4,8 @@ import { pathToFileURL } from 'node:url';
 
 const REPOSITORY = 'ezclassify/sdk-js';
 const WORKFLOW = '.github/workflows/ci.yml';
-// A dispatched run with full=true has exactly these two jobs. A run dispatched
-// without it has no `full` job and is refused.
+// A dispatched run with full=true has exactly these two jobs, both successful.
+// Without full=true the `full` job is reported as skipped, so it is refused.
 const REQUIRED = ['ci', 'full'];
 const fullEvent = (event) => event === 'workflow_dispatch';
 const positive = (value) => Number.isSafeInteger(value) && value > 0;

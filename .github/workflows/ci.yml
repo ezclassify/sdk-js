@@ -130,8 +130,9 @@ jobs:
       - name: Publish-readiness (pack)
         run: npm pack --dry-run
 
-      # The generated spec version and response shapes are committed. A build
-      # that changes them means the committed copies are stale.
+      # deps:relock rewrites package.json and restores it, and the generators
+      # write ignored sources. A tracked change or a new unignored file here
+      # means one of those leaked into the tree.
       - name: Clean tree
         run: |
           if [ -n "$(git status --porcelain)" ]; then
