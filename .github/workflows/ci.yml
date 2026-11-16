@@ -107,11 +107,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
-
+      # Builds first: tests/first-app.spec.ts resolves @ezclassify/rest-client
+      # by name, and its exports point into dist.
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test
 
       # The wire corpus again, this time over a socket. `npm test` replays it
       # through a transport stub in process, which cannot see what a real HTTP
@@ -182,11 +184,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
-
+      # Builds first: tests/first-app.spec.ts resolves @ezclassify/rest-client
+      # by name, and its exports point into dist.
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test
 
       - name: Conformance server (wire corpus over HTTP)
         run: npm run test:conformance-server
