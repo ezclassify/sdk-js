@@ -346,6 +346,8 @@ describe('qualified native mirror publication', () => {
         expect(workflow).toContain(
             'import { EzClassifyClient, EzClassifyError, connectContext } from "@ezclassify/rest-client"',
         );
-        expect(workflow).toContain('error.code !== cjs.ErrorCodes.INVALID_INPUT');
+        expect(workflow).toContain(
+            'error.code !== cjs.ErrorCodes.INVALID_INPUT',
+        );
     });
 });
