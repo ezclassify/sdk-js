@@ -10,12 +10,12 @@ import * as path from 'node:path';
  * repository's sharpest controls sits outside the default half of it:
  * `scripts/vendor-spec-provenance.spec.ts`, the only thing that checks the
  * vendored spec's provenance against its manifest. Drop `scripts/**` from the
- * include and it stops running: the suite reports a smaller file count,
- * passes, exits 0, and nothing anywhere says the provenance went unchecked.
+ * include and it stops running: the suite reports a smaller file count, passes,
+ * exits 0, and nothing anywhere says the provenance went unchecked.
  *
- * That file cannot catch it, because a file that is no longer discovered
- * cannot assert its own discovery. So the assertion lives here, under
- * `tests/`, which the include covers.
+ * That file cannot catch it, because a file that is no longer discovered cannot
+ * assert its own discovery. So the assertion lives here, under `tests/`, which
+ * the include covers.
  */
 const ROOT = path.resolve(__dirname, '..');
 
