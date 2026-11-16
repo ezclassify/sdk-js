@@ -339,11 +339,15 @@ describe('qualified native mirror publication', () => {
         expect(tokens).toEqual(Array(3).fill('${{ github.token }}'));
         expect(workflow).not.toContain('secrets.EZ_GHPKG_TOKEN');
     });
-    it('proves both connection exports in installed CJS, ESM, and declarations', () => {
-        expect(workflow).toContain('clientFromConnection');
-        expect(workflow).toContain('readClientConnection');
+    it('proves the public surface in installed CJS, ESM, and declarations', () => {
         expect(workflow).toContain(
-            'for (const name of ["EzClassifyClient", "clientFromConnection", "readClientConnection"])',
+            'for (const name of ["EzClassifyClient", "connectContext", "EzClassifyError"])',
+        );
+        expect(workflow).toContain(
+            'import { EzClassifyClient, EzClassifyError, connectContext } from "@ezclassify/rest-client"',
+        );
+        expect(workflow).toContain(
+            'error.code !== cjs.ErrorCodes.INVALID_INPUT',
         );
     });
 });

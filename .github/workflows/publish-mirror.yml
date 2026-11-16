@@ -134,11 +134,11 @@ jobs:
         # exercises both entry points.
         #
         # The behavioral half matters as much as the import half. A bundle that
-        # loads and answers wrongly is worse than one that fails to load, so the
-        # denial-shape predicate is called with a body that is the denial shape
-        # and then with one that is not. If the second call does not come back
-        # false, the published code is inert and this job fails even though the
-        # publish succeeded.
+        # loads and answers wrongly is worse than one that fails to load, so
+        # connectContext is called without a Context id and must refuse it with
+        # an EzClassifyError carrying INVALID_INPUT, before any request leaves.
+        # If it resolves or fails any other way, the published code is wrong and
+        # this job fails even though the publish succeeded.
         run: |
           set -euo pipefail
           VERSION="${{ steps.plan.outputs.version }}"
@@ -171,15 +171,15 @@ jobs:
             const manifest = JSON.parse(fs.readFileSync(path.join(home, "package.json"), "utf8"));
             const dts = path.join(home, manifest.types);
             if (!fs.existsSync(dts)) throw new Error(`published types entry is missing: ${dts}`);
-            for (const name of ["EzClassifyClient", "clientFromConnection", "readClientConnection"]) {
+            for (const name of ["EzClassifyClient", "connectContext", "EzClassifyError"]) {
               if (!fs.readFileSync(dts, "utf8").includes(name)) {
                 throw new Error(`published .d.ts does not declare ${name}`);
               }
             }
-            console.log("types entry declares the client and connection helpers");
+            console.log("types entry declares the client, connectContext and the error type");
 
             const cjs = require("@ezclassify/rest-client");
-            for (const name of ["EzClassifyClient", "connectContext", "clientFromConnection", "readClientConnection", "isDenialShapedBody", "EzClassifyError"]) {
+            for (const name of ["EzClassifyClient", "connectContext", "EzClassifyError"]) {
               if (typeof cjs[name] !== "function") throw new Error(`CJS entry does not export ${name}`);
             }
             if (!cjs.ErrorCodes || cjs.ErrorCodes.NETWORK !== "NETWORK") {
@@ -187,18 +187,21 @@ jobs:
             }
             console.log("CJS entry exports the public surface");
 
-            if (cjs.isDenialShapedBody({ error: "not_found" }) !== true) {
-              throw new Error("published client does not recognize the denial shape");
-            }
-            if (cjs.isDenialShapedBody({ error: "not_found", path: "/v1/schemes" }) !== false) {
-              throw new Error("published client calls a genuine not-found a denial: it is matching loosely, or not at all");
-            }
-            console.log("published client tells a denial from a genuine not-found");
+            cjs.connectContext({ baseUrl: "http://127.0.0.1:9" }).then(
+              () => { console.error("published connectContext accepted a connection without a Context id"); process.exit(1); },
+              (error) => {
+                if (!(error instanceof cjs.EzClassifyError) || error.code !== cjs.ErrorCodes.INVALID_INPUT) {
+                  console.error("published connectContext refused a missing Context id the wrong way:", error);
+                  process.exit(1);
+                }
+                console.log("published connectContext refuses a connection without a Context id");
+              },
+            );
           '
 
           node --input-type=module -e '
-            import { EzClassifyClient, connectContext, clientFromConnection, readClientConnection } from "@ezclassify/rest-client";
-            if (typeof EzClassifyClient !== "function" || typeof connectContext !== "function" || typeof clientFromConnection !== "function" || typeof readClientConnection !== "function") {
+            import { EzClassifyClient, EzClassifyError, connectContext } from "@ezclassify/rest-client";
+            if (typeof EzClassifyClient !== "function" || typeof EzClassifyError !== "function" || typeof connectContext !== "function") {
               throw new Error("ESM entry does not export the public surface");
             }
             console.log("ESM entry exports the public surface");
