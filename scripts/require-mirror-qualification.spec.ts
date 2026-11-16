@@ -5,13 +5,7 @@ import { requireMirrorQualification } from './require-mirror-qualification.mjs';
 
 const sha = 'a'.repeat(40);
 const repository = { full_name: 'ezclassify/sdk-js' };
-const names = [
-    'policy / plan',
-    'build-and-test (22)',
-    'build-and-test (24)',
-    'qualification / accept',
-    'ci / accept',
-];
+const names = ['ci', 'full'];
 const run = {
     id: 51,
     run_number: 12,
@@ -83,40 +77,36 @@ const qualify = (
     });
 
 describe('exact-source native SDK full qualification', () => {
-    it.each(['workflow_dispatch', 'schedule'])(
-        'admits complete %s source and pins run, attempt, matrix and job IDs',
-        async (event) => {
-            const selected = { ...run, event };
-            const f = fixture({ runs: [selected], runRead: () => selected });
-            const evidence = await requireMirrorQualification({
+    it('admits a complete dispatched source and pins run, attempt and job IDs', async () => {
+        const f = fixture({ runs: [run], runRead: () => run });
+        const evidence = await requireMirrorQualification({
+            sha,
+            checkoutSha: sha,
+            request: f.request,
+        });
+        expect(evidence).toMatchObject({
+            repository: repository.full_name,
+            sha,
+            runId: 51,
+            attempt: 2,
+            runNumber: 12,
+        });
+        expect(evidence.jobs.map((job: Job) => job.name).sort()).toEqual(
+            [...names].sort(),
+        );
+        expect(f.paths).toContain(
+            '/repos/ezclassify/sdk-js/actions/runs/51/attempts/2/jobs?per_page=100',
+        );
+        await expect(
+            requireMirrorQualification({
                 sha,
                 checkoutSha: sha,
                 request: f.request,
-            });
-            expect(evidence).toMatchObject({
-                repository: repository.full_name,
-                sha,
-                runId: 51,
-                attempt: 2,
-                runNumber: 12,
-            });
-            expect(evidence.jobs.map((job: Job) => job.name).sort()).toEqual(
-                [...names].sort(),
-            );
-            expect(f.paths).toContain(
-                '/repos/ezclassify/sdk-js/actions/runs/51/attempts/2/jobs?per_page=100',
-            );
-            await expect(
-                requireMirrorQualification({
-                    sha,
-                    checkoutSha: sha,
-                    request: f.request,
-                    expected: evidence,
-                }),
-            ).resolves.toEqual(evidence);
-        },
-    );
-    it.each(['push', 'pull_request'])(
+                expected: evidence,
+            }),
+        ).resolves.toEqual(evidence);
+    });
+    it.each(['push', 'pull_request', 'schedule'])(
         'refuses routine green %s qualification',
         async (event) => {
             await expect(
@@ -173,7 +163,7 @@ describe('exact-source native SDK full qualification', () => {
         { status: 'in_progress' },
         { conclusion: 'skipped' },
         { conclusion: 'failure' },
-        { name: 'build-and-test (20)' },
+        { name: 'full (20)' },
         { head_sha: 'b'.repeat(40) },
         { run_id: 50 },
         { run_attempt: 1 },

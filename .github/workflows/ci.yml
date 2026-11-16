@@ -1,45 +1,37 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-  workflow_dispatch: null
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Also run the release-only job (Node 24). The release train accepts a successful run of this on the exact commit.
+        type: boolean
+        default: false
 
-permissions:
-  contents: read
-  packages: read
+permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  policy:
-    uses: ezclassify/.github/.github/workflows/ci-policy.yml@a42ece80f520858a2926723d12bba2af2dca0474
-    with:
-      primary-version: '22'
-      full-versions: '["22","24"]'
-  build-and-test:
+  ci:
+    name: ci
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
-    strategy:
-      matrix:
-        node-version: ${{ fromJSON(needs.policy.outputs.versions) }}
-
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - uses: ezclassify/.github/actions/setup-node-npm@a42ece80f520858a2926723d12bba2af2dca0474 # v7.0.0
         with:
-          node-version: ${{ matrix.node-version }}
+          persist-credentials: false
+
+      - uses: ezclassify/.github/actions/setup-node-npm@da1e243029be7e724f808cca11e385e6d79eee8b # v7.0.0
+        with:
+          node-version: '22'
 
       - name: Configure package registry
         # Routes the @ezclassify scope to the GitHub Packages development
@@ -61,19 +53,21 @@ jobs:
           NPMRC
           echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/ci-npmrc" >> "$GITHUB_ENV"
 
-      # Resolve a lockfile from an empty dependency tree against the
-      # registries configured above, then prove those exact bytes with npm ci.
+      # The lockfile is not committed (.gitignore), so the install resolves one
+      # from an empty tree and proves those exact bytes with npm ci.
       #
       # Only the @ezclassify scope is routed to the mirror. Third-party
-      # packages still come from npmjs, and the installed dependency gate below holds the line on which first-party names may arrive.
+      # packages still come from npmjs, and the installed dependency gate below
+      # holds the line on which first-party names may arrive.
       #
       # deps:relock resolves third-party packages only from versions at least
-      # seven days old, then resolves the first-party ones with `--tag=dev`,
-      # the tag the mirror publishes every build under.
+      # seven days old, resolves the first-party ones with `--tag=dev`, the tag
+      # the mirror publishes every build under, and then runs the portability
+      # and dependency-age checks itself.
       - name: Install
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.EZ_GHPKG_TOKEN || github.token }}
-        uses: ezclassify/.github/actions/install-node-dependencies@a42ece80f520858a2926723d12bba2af2dca0474
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        uses: ezclassify/.github/actions/install-node-dependencies@da1e243029be7e724f808cca11e385e6d79eee8b
         with:
           mode: generated
           relock-installs: 'false'
@@ -100,12 +94,6 @@ jobs:
         # A pattern would admit an unrelated package on a shared prefix.
         run: node scripts/check-installed-public-deps.mjs
 
-      # Third-party lockfile entries published inside the last seven days are
-      # refused; first-party packages are exempt. Fails closed when a registry
-      # cannot be read.
-      - name: Dependency age
-        run: npm run check:dependency-age
-
       - name: Format check
         run: npm run format:check
 
@@ -119,6 +107,8 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Builds first: tests/first-app.spec.ts resolves @ezclassify/rest-client
+      # by name, and its exports point into dist.
       - name: Build
         run: npm run build
 
@@ -141,30 +131,69 @@ jobs:
       # it with `npm run`; tests/publish-lifecycle.spec.ts holds the line.
       - name: Publish-readiness (pack)
         run: npm pack --dry-run
-    needs:
-      - policy
-    if: ${{ needs.policy.result == 'success' }}
-  qualification:
-    needs:
-      - policy
-      - build-and-test
-    if: ${{ always() && !cancelled() && needs.policy.result == 'success' && needs.policy.outputs.full == 'true' }}
-    uses: ezclassify/.github/.github/workflows/ci-result.yml@a42ece80f520858a2926723d12bba2af2dca0474
-    with:
-      results: ${{ toJSON(needs) }}
-      full: ${{ needs.policy.outputs.full == 'true' }}
-      full-only: '[]'
-      optional: '[]'
-  ci:
-    needs:
-      - policy
-      - build-and-test
-      - qualification
-    if: ${{ always() && !cancelled() }}
-    uses: ezclassify/.github/.github/workflows/ci-result.yml@a42ece80f520858a2926723d12bba2af2dca0474
-    with:
-      results: ${{ toJSON(needs) }}
-      full: ${{ needs.policy.outputs.full == 'true' }}
-      full-only: '["qualification"]'
-      optional: '[]'
-run-name: CI · ${{ github.event_name }} · ${{ github.ref_name }}
+
+      # deps:relock rewrites package.json and restores it, and the generators
+      # write ignored sources. A tracked change or a new unignored file here
+      # means one of those leaked into the tree.
+      - name: Clean tree
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            echo 'The build changed tracked files or left new ones.' >&2
+            exit 1
+          fi
+
+  # Release only. Nothing else in this repository runs on a second Node major,
+  # so this is where the supported range is exercised. The release train accepts
+  # a workflow_dispatch run of this workflow with full=true on the exact commit.
+  full:
+    name: full
+    if: ${{ inputs.full }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: ezclassify/.github/actions/setup-node-npm@da1e243029be7e724f808cca11e385e6d79eee8b # v7.0.0
+        with:
+          node-version: '24'
+
+      # Same routing as the ci job: the throwaway user config keeps the
+      # committed .npmrc untouched.
+      - name: Configure package registry
+        run: |
+          cat > "$RUNNER_TEMP/ci-npmrc" << 'NPMRC'
+          @ezclassify:registry=https://npm.pkg.github.com
+          //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+          NPMRC
+          echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/ci-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        uses: ezclassify/.github/actions/install-node-dependencies@da1e243029be7e724f808cca11e385e6d79eee8b
+        with:
+          mode: generated
+          relock-installs: 'false'
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Builds first: tests/first-app.spec.ts resolves @ezclassify/rest-client
+      # by name, and its exports point into dist.
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Conformance server (wire corpus over HTTP)
+        run: npm run test:conformance-server
+
+      - name: Publish-readiness (pack)
+        run: npm pack --dry-run

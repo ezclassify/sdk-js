@@ -4,15 +4,10 @@ import { pathToFileURL } from 'node:url';
 
 const REPOSITORY = 'ezclassify/sdk-js';
 const WORKFLOW = '.github/workflows/ci.yml';
-const REQUIRED = [
-    'policy / plan',
-    'build-and-test (22)',
-    'build-and-test (24)',
-    'qualification / accept',
-    'ci / accept',
-];
-const fullEvent = (event) =>
-    event === 'workflow_dispatch' || event === 'schedule';
+// A dispatched run with full=true has exactly these two jobs, both successful.
+// Without full=true the `full` job is reported as skipped, so it is refused.
+const REQUIRED = ['ci', 'full'];
+const fullEvent = (event) => event === 'workflow_dispatch';
 const positive = (value) => Number.isSafeInteger(value) && value > 0;
 const refuse = () => {
     throw new Error(

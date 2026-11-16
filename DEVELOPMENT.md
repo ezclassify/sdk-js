@@ -46,7 +46,7 @@ by hand.
 ## The development mirror
 
 [`.github/workflows/publish-mirror.yml`](.github/workflows/publish-mirror.yml) republishes `@ezclassify/rest-client` to
-a GitHub Packages development mirror every night a commit landed, and
+a GitHub Packages development mirror when a maintainer dispatches it, and
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) installs the contracts packages from the same
 mirror. The routing is written to a throwaway user config on the runner, so the
 committed [`.npmrc`](.npmrc), and the `ignore-scripts=true` in it, stay as they are. The
@@ -57,14 +57,13 @@ qualifying its source; forks and non-main dispatches cannot publish.
 
 Before dependency installation, the publisher requires a completed successful
 full `.github/workflows/ci.yml` run at the exact checked-out official main SHA.
-Run that existing workflow manually on the final merged source: ordinary push
-and PR CI are not full qualification. The guard checks both Node 22 and 24,
-`policy / plan`, `qualification / accept`, and `ci / accept` in the same run
-attempt. It refuses missing, skipped, failed, duplicate, or truncated evidence
-and a newer unsuccessful full run. Immediately before publication it rechecks
-main and the same qualification tuple. `force` bypasses only the 24-hour age
-check. Scheduled publication uses the same qualification gate; it does not
-create new qualification runs automatically.
+Dispatch that workflow manually with `full` set on the final merged source:
+pull request CI is not full qualification. The guard checks the `ci` and `full`
+(Node 24) jobs in the same run attempt. It refuses missing, skipped, failed,
+duplicate, or truncated evidence and a newer unsuccessful dispatched run.
+Immediately before publication it rechecks main and the same qualification
+tuple. `force` bypasses only the 24-hour age check. Publication does not create
+qualification runs.
 
 The job uses its ephemeral `github.token` for dependency reads, restricted
 publication, and the cold-install proof, with `contents: read`, `actions: read`,
@@ -172,27 +171,12 @@ vendor/            the vendored public contract (read-only, see below)
 [`vendor/spec/`](vendor/spec/) and [`vendor/SPEC.md`](vendor/SPEC.md) are written only by the
 `ezclassify-spec-bot` GitHub App, which vendors the published contract from
 [ezclassify/contracts](https://github.com/ezclassify/contracts). Do not edit those paths by hand. Change the source in
-[ezclassify/contracts](https://github.com/ezclassify/contracts) and the spec bot re-vendors it. The `vendor-readonly` workflow
-enforces this.
+[ezclassify/contracts](https://github.com/ezclassify/contracts) and the spec bot re-vendors it. CODEOWNERS routes any change
+under `vendor/spec/` to the maintainers.
 
-It gates on two things, on both the push and the pull-request path: every
-commit touching [`vendor/`](vendor/) must be authored as
-`ezclassify-spec-bot[bot] <ezclassify-spec-bot[bot]@users.noreply.github.com>`,
-name and email both, and its subject must start with `chore(spec):`. A pull
-request must also be opened by the bot, unless a maintainer attaches the
-`spec-mirror-override` label, which exists only on the pull-request path.
-
-What that catches is the hand-edit. Author name, author email and subject are
-all free-text fields of the commit object, chosen by whoever writes the commit,
-so a writer who sets all three passes. The gate stops the accident; it does not
-authenticate anyone.
-Authenticating the writer would take branch protection on the vendored paths or
-required signature verification, and neither is configured.
-
-[`scripts/vendor-readonly-gate.spec.ts`](scripts/vendor-readonly-gate.spec.ts) runs that workflow's own shell against
-throwaway git history, so the gate's behavior is checked locally rather than
-inferred from reading the YAML. That includes the forged-identity case above,
-asserted as passing, so the limit is pinned rather than described.
+[`scripts/vendor-spec-provenance.spec.ts`](scripts/vendor-spec-provenance.spec.ts) checks that the manifest's hashes
+match the committed spec and that `SPEC.md` agrees with the manifest about the
+source commit.
 
 ## Tests that read the spec
 
