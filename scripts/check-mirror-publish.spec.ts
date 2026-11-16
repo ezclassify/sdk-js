@@ -188,9 +188,9 @@ describe('the workflow that runs the guard', () => {
         expect(workflow).toContain('npm publish --tag dev --access restricted');
     });
 
-    it('runs after the contracts mirror it installs from', () => {
-        // contracts publishes at 05:45 UTC, so this slot comes after it.
-        expect(workflow).toContain("cron: '10 6 * * *'");
+    it('is dispatched by hand and never scheduled', () => {
+        const { on } = load(workflow) as { on: Record<string, unknown> };
+        expect(Object.keys(on)).toEqual(['workflow_dispatch']);
     });
 });
 
@@ -211,7 +211,7 @@ describe('the CI install lane', () => {
     it('routes @ezclassify at the mirror before anything is installed', () => {
         const document = load(ci) as {
             jobs: {
-                'build-and-test': {
+                ci: {
                     steps: Array<{
                         run?: string;
                         uses?: string;
@@ -220,7 +220,7 @@ describe('the CI install lane', () => {
                 };
             };
         };
-        const steps = document.jobs['build-and-test'].steps;
+        const steps = document.jobs.ci.steps;
         const route = steps.findIndex((step) =>
             step.run?.includes(
                 '@ezclassify:registry=https://npm.pkg.github.com',
@@ -241,8 +241,8 @@ describe('the CI install lane', () => {
     });
 
     it('gives the install a token, because the mirror refuses anonymous reads', () => {
-        expect(ci).toContain('NODE_AUTH_TOKEN:');
-        expect(ci).toContain('secrets.EZ_GHPKG_TOKEN');
+        expect(ci).toContain('NODE_AUTH_TOKEN: ${{ github.token }}');
+        expect(ci).not.toContain('secrets.');
         expect(ci).toContain('packages: read');
     });
 

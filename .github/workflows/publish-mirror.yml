@@ -1,18 +1,15 @@
 name: Publish mirror (GitHub Packages)
 
-# Nightly republish of @ezclassify/rest-client to the organization's GitHub
-# Packages development mirror.
+# Republishes @ezclassify/rest-client to the organization's GitHub Packages
+# development mirror. Dispatched by hand on official main; there is no schedule.
 #
 # Repositories that consume this package between releases install it from
-# the mirror. The slot is 06:10 UTC, after the contracts packages this
-# repository installs and before the consumers that install this one.
+# the mirror.
 #
 # The mirror carries prerelease versions only: 1.0.0-mirror.N, never a plain
 # 1.0.0. The real npm publish belongs to the release process.
 
 on:
-  schedule:
-    - cron: '10 6 * * *' # 06:10 UTC nightly, after contracts (05:45)
   workflow_dispatch:
     inputs:
       force:
