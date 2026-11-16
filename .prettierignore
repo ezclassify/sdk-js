@@ -4,8 +4,7 @@ src/spec-version.ts
 src/response-shapes.ts
 
 # The vendored spec and its provenance record are written by the spec bot from
-# the contracts repository. Any local reformatting would read as spec drift;
-# the vendor-readonly workflow gates their integrity.
+# the contracts repository. Any local reformatting would read as spec drift.
 vendor/
 
 # Generated TypeDoc output

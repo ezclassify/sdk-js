@@ -6,25 +6,21 @@ import * as path from 'node:path';
 /**
  * That the test runner still picks up the specs outside `tests/`.
  *
- * The vitest config narrows discovery to an explicit list, and two of this
- * repository's sharpest controls sit outside the default half of it:
- * `scripts/vendor-spec-provenance.spec.ts` and
- * `scripts/vendor-readonly-gate.spec.ts`, which between them are the only
- * things that check the bot-owned vendored spec channel. Drop `scripts/**` from
- * the include and both stop running: the suite reports a smaller file count,
- * passes, exits 0, and nothing anywhere says the vendor gate went unchecked.
+ * The vitest config narrows discovery to an explicit list, and one of this
+ * repository's sharpest controls sits outside the default half of it:
+ * `scripts/vendor-spec-provenance.spec.ts`, the only thing that checks the
+ * vendored spec's provenance against its manifest. Drop `scripts/**` from the
+ * include and it stops running: the suite reports a smaller file count,
+ * passes, exits 0, and nothing anywhere says the provenance went unchecked.
  *
- * Neither of those files can catch it, because a file that is no longer
- * discovered cannot assert its own discovery. So the assertion lives here,
- * under `tests/`, which the include covers.
+ * That file cannot catch it, because a file that is no longer discovered
+ * cannot assert its own discovery. So the assertion lives here, under
+ * `tests/`, which the include covers.
  */
 const ROOT = path.resolve(__dirname, '..');
 
-/** Specs that guard the vendored spec channel and live outside `tests/`. */
-const GUARD_SPECS = [
-    'scripts/vendor-spec-provenance.spec.ts',
-    'scripts/vendor-readonly-gate.spec.ts',
-];
+/** Specs that guard the vendored spec and live outside `tests/`. */
+const GUARD_SPECS = ['scripts/vendor-spec-provenance.spec.ts'];
 
 describe('spec discovery', () => {
     const config = readFileSync(path.join(ROOT, 'vitest.config.mjs'), 'utf8');
@@ -32,7 +28,7 @@ describe('spec discovery', () => {
     it.each(GUARD_SPECS)('%s is present', (relativePath) => {
         expect(
             existsSync(path.join(ROOT, relativePath)),
-            `${relativePath} guards the vendor/ channel. If it was deliberately ` +
+            `${relativePath} guards the vendored spec. If it was deliberately ` +
                 `retired, retire this assertion in the same commit and say why.`,
         ).toBe(true);
     });
@@ -41,8 +37,8 @@ describe('spec discovery', () => {
         expect(
             config,
             "vitest.config.mjs must include 'scripts/**/*.spec.ts'. Without it " +
-                'the vendor-readonly specs are silently not run and the suite ' +
-                'still exits 0.',
+                'the vendored-spec provenance spec is silently not run and the ' +
+                'suite still exits 0.',
         ).toContain("'scripts/**/*.spec.ts'");
     });
 });
