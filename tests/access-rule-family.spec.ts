@@ -36,10 +36,8 @@ function envelope(result: unknown) {
             contextId: 'records',
             resolvedVersion: '1.2.3',
             artifacts: [],
-            sources: [],
         },
         result,
-        operationLimitations: [],
     };
 }
 
@@ -82,60 +80,74 @@ describe('AccessOps rule family', () => {
         expect(rules.map((r) => r.rule.ruleId)).toEqual(['r1', 'r2']);
     });
 
-    it('reads the rule ids off the response the descriptions already fetched', async () => {
+    it('reports the policy marking off the response the rules already fetched', async () => {
         fetchMock.mockResolvedValue(
             mockResponse(
                 200,
                 JSON.stringify({
-                    rules: [ruleDescription('r1'), ruleDescription('r2')],
+                    marking: 'OPEN',
+                    rules: [ruleDescription('r1')],
                 }),
             ),
         );
         const c = ctxClient();
 
-        await c.access.describeAllAccessRules();
-        const ids = await c.access.listAccessRuleIds();
+        const rules = await c.access.describeAllAccessRules();
+        const marking = await c.access.describeAccessMarking();
 
-        expect(ids).toEqual(['r1', 'r2']);
+        expect(rules.map((r) => r.rule.ruleId)).toEqual(['r1']);
+        expect(marking).toBe('OPEN');
         expect(fetchMock).toHaveBeenCalledTimes(1);
     });
+
+    it('reports no marking for a policy that declares none', async () => {
+        fetchMock.mockResolvedValue(
+            mockResponse(
+                200,
+                JSON.stringify({ rules: [ruleDescription('r1')] }),
+            ),
+        );
+
+        await expect(
+            ctxClient().access.describeAccessMarking(),
+        ).resolves.toBeUndefined();
+    });
+
+    it.each([7, null, { text: 'OPEN' }])(
+        'rejects a policy marking that is not text: %j',
+        async (marking) => {
+            fetchMock.mockResolvedValue(
+                mockResponse(
+                    200,
+                    JSON.stringify({ marking, rules: [ruleDescription('r1')] }),
+                ),
+            );
+
+            await expect(
+                ctxClient().access.describeAccessMarking(),
+            ).rejects.toThrow(
+                /Malformed response from GET access\/rules: \/marking/,
+            );
+        },
+    );
 
     it('rejects a rule list with no rules array', async () => {
         fetchMock.mockResolvedValue(
             mockResponse(200, JSON.stringify({ items: [] })),
         );
 
-        await expect(ctxClient().access.listAccessRuleIds()).rejects.toThrow(
-            /Malformed response from GET access\/rules: \/rules/,
-        );
+        await expect(
+            ctxClient().access.describeAllAccessRules(),
+        ).rejects.toThrow(/Malformed response from GET access\/rules: \/rules/);
     });
 
-    it('describes one rule through the context envelope', async () => {
-        fetchMock.mockResolvedValue(
-            mockResponse(200, JSON.stringify(envelope(ruleDescription('r1')))),
-        );
-
-        const rule = await ctxClient().access.describeAccessRule('r1');
-
-        expect(fetchMock.mock.calls[0][0]).toBe(
-            'https://api.example.com/v1/ctx/records/1.2.3/access/describe-rule',
-        );
-        expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-            ruleId: 'r1',
-        });
-        expect(rule.name).toBe('Rule r1');
-    });
-
-    it('answers requirements without the envelope its context sibling keeps', async () => {
+    it('keeps the resolved Context envelope on requirements', async () => {
         const description = corpusResult('ctx-access-describe-requirements.ok');
         fetchMock.mockResolvedValue(
             mockResponse(200, JSON.stringify(envelope(description))),
         );
         const c = ctxClient({ disableCache: true });
 
-        const bare = await c.access.describeAccessRequirements({
-            marking: 'LEVEL-HIGH',
-        });
         const enveloped = await c.context.accessRequirements({
             marking: 'LEVEL-HIGH',
         });
@@ -143,15 +155,12 @@ describe('AccessOps rule family', () => {
         expect(fetchMock.mock.calls[0][0]).toBe(
             'https://api.example.com/v1/ctx/records/1.2.3/access/describe-requirements',
         );
-        expect(bare).toEqual(description);
         expect(enveloped.result).toEqual(description);
         expect(enveloped.resolution.resolvedVersion).toBe('1.2.3');
     });
 
     it('refuses the rule family on a client bound to no context', async () => {
-        const flat = new EzClassifyClient('https://api.example.com', {
-            heartbeat: false,
-        });
+        const flat = new EzClassifyClient('https://api.example.com', {});
 
         await expect(flat.access.describeAllAccessRules()).rejects.toThrow(
             /requires a context-bound client/,

@@ -4,7 +4,7 @@
   from the published contract in ezclassify/contracts.
 -->
 
-# Vendored Spec Bundle: `client-js`
+# Vendored Spec Bundle: `sdk-js`
 
 > **This file is generated.** Do not edit it or anything under `vendor/spec/`.
 > The next spec update overwrites local changes. See [Updating the mirror](#updating-the-mirror).
@@ -36,11 +36,11 @@ the reference contract.
 | `openapiVersion`          | `1.0.0-dev.30`          |
 | `abiVersion`              | `v1`              |
 | `replayerContractVersion` | `1` |
-| `contracts@`              | `8fb77d1299f537cfe13d50eb26b41ff4bc881766`      |
-| `specSourceUrl`           | https://github.com/ezclassify/contracts/tree/8fb77d1299f537cfe13d50eb26b41ff4bc881766/libs/openapi/openapi.yaml             |
-| `targetRepo`              | `client-js`          |
-| `releaseDateUtc`          | `2026-11-03T16:15:23.000Z`          |
-| `generatorScript@`        | `03ea9e6a520c`      |
+| `contracts@`              | `efd69569397aaa3ad99b87df03121f2e233dd2e1`      |
+| `specSourceUrl`           | https://github.com/ezclassify/contracts/tree/efd69569397aaa3ad99b87df03121f2e233dd2e1/libs/openapi/openapi.yaml             |
+| `targetRepo`              | `sdk-js`          |
+| `releaseDateUtc`          | `2026-11-15T21:50:55.000Z`          |
+| `generatorScript@`        | `dec8afbeb2b2`      |
 
 `abiVersion` is the wire interface version the server reports on `/v1/health`. It is fixed at `v1`.
 

@@ -42,8 +42,8 @@ function mockConnectOk(fetchMock: ReturnType<typeof vi.fn>): void {
 
 /**
  * What a healthy server answers each leg of a context-bound connect with: the
- * health probe, the Context description, then the seven scheme sub-resources
- * the profile is assembled from.
+ * health probe, the Context description, then the six scheme sub-resources the
+ * profile is assembled from.
  */
 function connectBody(url: string): unknown {
     const resource = ctxSchemeResourceBody(url);
@@ -82,50 +82,6 @@ describe('connectContext: named/versioned context connections', () => {
             client.destroy();
         });
 
-        it('carries cacheAccessDecisions through to the client it builds', async () => {
-            // The option is only worth having if it is reachable from the entry
-            // point most consumers use, so connect.ts carries it beside `auth`.
-            fetchMock.mockImplementation((url: string) =>
-                Promise.resolve(
-                    mockResponse(
-                        200,
-                        JSON.stringify(
-                            url.endsWith('/access/check')
-                                ? {
-                                      resolution: {
-                                          contextId: 'acme-prod',
-                                          resolvedVersion: '1.0.0',
-                                          artifacts: [],
-                                          sources: [],
-                                      },
-                                      result: corpusResult(
-                                          'ctx-access-check.assertions',
-                                      ),
-                                      operationLimitations: [],
-                                  }
-                                : connectBody(url),
-                        ),
-                    ),
-                ),
-            );
-            const client = await connectContext({
-                baseUrl: 'https://api.example.com',
-                contextId: 'acme-prod',
-                contextVersion: '1.0.0',
-                cacheAccessDecisions: true,
-            });
-
-            await client.access.check([], { clearance: 'HIGH' });
-            await client.access.check([], { clearance: 'HIGH' });
-
-            expect(
-                fetchMock.mock.calls.filter((call: [string, RequestInit]) =>
-                    call[0].endsWith('/access/check'),
-                ),
-            ).toHaveLength(1);
-            client.destroy();
-        });
-
         it.each([
             [
                 'with a contextToken',
@@ -160,19 +116,6 @@ describe('connectContext: named/versioned context connections', () => {
             },
         );
 
-        it('passes caller accessToken through to the Authorization header', async () => {
-            mockConnectOk(fetchMock);
-            await connectContext({
-                baseUrl: 'https://api.example.com',
-                contextId: 'acme-prod',
-                contextVersion: '1.0.0',
-                accessToken: 'caller-access-token',
-            });
-            const [, init] = fetchMock.mock.calls[0];
-            const headers = init.headers as Record<string, string>;
-            expect(headers['Authorization']).toBe('Bearer caller-access-token');
-        });
-
         it('reaches the token supplier through the entry point', async () => {
             // The whole point of a supplier is a credential the client can
             // re-resolve, from the entry point nearly every consumer uses.
@@ -193,50 +136,154 @@ describe('connectContext: named/versioned context connections', () => {
             client.destroy();
         });
 
-        it('keeps the auth-failure hook the client was given', async () => {
-            // Every leg of the connect succeeds; the op under test is the first
-            // request that meets the denial.
-            let connected = false;
-            fetchMock.mockImplementation((url: string) =>
-                Promise.resolve(
-                    connected
-                        ? mockResponse(
-                              404,
-                              JSON.stringify({ error: 'not_found' }),
-                          )
-                        : mockResponse(200, JSON.stringify(connectBody(url))),
-                ),
-            );
-            const onAuthFailure = vi.fn();
-
+        it('sends the application id on the Context requests it makes', async () => {
+            mockConnectOk(fetchMock);
             const client = await connectContext({
                 baseUrl: 'https://api.example.com',
                 contextId: 'acme-prod',
                 contextVersion: '1.0.0',
-                auth: { token: () => 'stale-token', onAuthFailure },
+                applicationId: 'case-intake-portal',
             });
-            connected = true;
-            await expect(client.scheme.process('TEST')).rejects.toThrow();
-
-            expect(onAuthFailure).toHaveBeenCalledOnce();
+            const sent = fetchMock.mock.calls.map(
+                ([url, init]: [string, RequestInit]) => [
+                    url,
+                    (init.headers as Record<string, string>)[
+                        'x-ezclassify-application-id'
+                    ],
+                ],
+            );
+            // The health probe is not a Context request.
+            expect(sent[0]).toEqual([
+                'https://api.example.com/v1/health',
+                undefined,
+            ]);
+            for (const [, id] of sent.slice(1)) {
+                expect(id).toBe('case-intake-portal');
+            }
             client.destroy();
         });
 
-        it('prefers auth over the plain accessToken when both are supplied', async () => {
-            mockConnectOk(fetchMock);
-
+        it('never answers an access check from memory', async () => {
+            // The round trip is the audit record, so a pinned client with the
+            // cache on still sends every check.
+            fetchMock.mockImplementation((url: string) =>
+                Promise.resolve(
+                    mockResponse(
+                        200,
+                        JSON.stringify(
+                            url.endsWith('/access/check')
+                                ? {
+                                      resolution: {
+                                          contextId: 'acme-prod',
+                                          resolvedVersion: '1.0.0',
+                                          artifacts: [],
+                                      },
+                                      result: corpusResult(
+                                          'ctx-access-check.assertions',
+                                      ),
+                                  }
+                                : connectBody(url),
+                        ),
+                    ),
+                ),
+            );
             const client = await connectContext({
                 baseUrl: 'https://api.example.com',
                 contextId: 'acme-prod',
                 contextVersion: '1.0.0',
-                accessToken: 'plain-token',
-                auth: { token: 'rich-token' },
+            });
+            await client.access.check([], { clearance: 'HIGH' });
+            await client.access.check([], { clearance: 'HIGH' });
+            expect(
+                fetchMock.mock.calls.filter((call: [string, RequestInit]) =>
+                    call[0].endsWith('/access/check'),
+                ),
+            ).toHaveLength(2);
+            client.destroy();
+        });
+
+        describe('a Context held under another id', () => {
+            // A held draft reports the Context its documents name, but the
+            // server serves it only under the id it holds it under, at that
+            // id's own versions. This server answers nothing else.
+            const HELD = `sbx-${'0'.repeat(64)}`;
+            const DRAFT_DESCRIBE = {
+                ...CTX_DESCRIBE,
+                id: 'case-records',
+                version: '2.1.0',
+            };
+
+            function serveHeldAt(version: string): void {
+                const held = `https://api.example.com/v1/ctx/${HELD}/${version}`;
+                fetchMock.mockImplementation((url: string) => {
+                    if (url === 'https://api.example.com/v1/health')
+                        return Promise.resolve(
+                            mockResponse(200, JSON.stringify({ status: 'ok' })),
+                        );
+                    if (url === held)
+                        return Promise.resolve(
+                            mockResponse(200, JSON.stringify(DRAFT_DESCRIBE)),
+                        );
+                    if (url.startsWith(`${held}/scheme`))
+                        return Promise.resolve(
+                            mockResponse(
+                                200,
+                                JSON.stringify(ctxSchemeResourceBody(url)),
+                            ),
+                        );
+                    return Promise.resolve(
+                        mockResponse(
+                            404,
+                            JSON.stringify({
+                                error: { code: 'NOT_FOUND', message: url },
+                            }),
+                        ),
+                    );
+                });
+            }
+
+            function profileUrls(): string[] {
+                return fetchMock.mock.calls
+                    .map((call) => String(call[0]))
+                    .filter((url) => url.includes('/scheme'));
+            }
+
+            it('reads the profile under the held id at latest when the binding names no version', async () => {
+                serveHeldAt('latest');
+                const client = await connectContext({
+                    baseUrl: 'https://api.example.com',
+                    contextId: HELD,
+                });
+                try {
+                    expect(client.connected).toBe(true);
+                    expect(client.scheme.getScheme().id).toBe('levels');
+                    const urls = profileUrls();
+                    expect(urls).toHaveLength(6);
+                    for (const url of urls) {
+                        expect(url).toContain(`/v1/ctx/${HELD}/latest/scheme`);
+                    }
+                } finally {
+                    client.destroy();
+                }
             });
 
-            const [, init] = fetchMock.mock.calls[0];
-            const headers = init.headers as Record<string, string>;
-            expect(headers['Authorization']).toBe('Bearer rich-token');
-            client.destroy();
+            it('reads the profile under the held id at the version the binding pins', async () => {
+                serveHeldAt('0.0.0');
+                const client = await connectContext({
+                    baseUrl: 'https://api.example.com',
+                    contextId: HELD,
+                    contextVersion: '0.0.0',
+                });
+                try {
+                    const urls = profileUrls();
+                    expect(urls).toHaveLength(6);
+                    for (const url of urls) {
+                        expect(url).toContain(`/v1/ctx/${HELD}/0.0.0/scheme`);
+                    }
+                } finally {
+                    client.destroy();
+                }
+            });
         });
 
         it('passes custom headers through', async () => {
@@ -294,7 +341,7 @@ describe('connectContext: named/versioned context connections', () => {
                 contextId: 'acme-prod',
                 contextVersion: '1.0.0',
             });
-            // Health, the Context decomposition, then the seven sub-resources
+            // Health, the Context decomposition, then the six sub-resources
             // the profile is assembled from.
             const urls = fetchMock.mock.calls.map(([url]: [string]) => url);
             expect(urls.slice(0, 2)).toEqual([
@@ -307,7 +354,6 @@ describe('connectContext: named/versioned context connections', () => {
                     'https://api.example.com/v1/ctx/acme-prod/1.0.0/scheme/categories',
                     'https://api.example.com/v1/ctx/acme-prod/1.0.0/scheme/concepts',
                     'https://api.example.com/v1/ctx/acme-prod/1.0.0/scheme/formats',
-                    'https://api.example.com/v1/ctx/acme-prod/1.0.0/scheme/grammar',
                     'https://api.example.com/v1/ctx/acme-prod/1.0.0/scheme/label-presets',
                     'https://api.example.com/v1/ctx/acme-prod/1.0.0/scheme/scopes',
                 ].sort(),
@@ -376,7 +422,7 @@ describe('connectContext: named/versioned context connections', () => {
                 contextVersion: '1.0.0',
             });
 
-            const meta = client.getSchemeMeta();
+            const meta = client.scheme.getSchemeMeta();
             expect(meta.defaultRenderFormat).toBe('record/wide');
             expect(meta.defaultPartRenderFormat).toBe('record/compact');
             expect(meta.defaultWholeRenderFormat).toBe('record/wide');
@@ -404,7 +450,7 @@ describe('connectContext: named/versioned context connections', () => {
                 })),
             ).toEqual(views);
             expect(
-                client
+                client.scheme
                     .getScheme()
                     .formats.map(({ id, outputView, defaultFor, role }) => ({
                         id,
@@ -415,17 +461,19 @@ describe('connectContext: named/versioned context connections', () => {
             ).toEqual(views);
             // A view that states no role reports none rather than a guess.
             expect(meta.formats?.[2]).not.toHaveProperty('role');
-            expect(client.getScheme().formats[2]).not.toHaveProperty('role');
-            expect(client.getScheme().contextFormats).toEqual({
+            expect(client.scheme.getScheme().formats[2]).not.toHaveProperty(
+                'role',
+            );
+            expect(client.scheme.getScheme().contextFormats).toEqual({
                 part: ['compact_line'],
                 whole: ['wide_line', 'wide_line_2019'],
             });
 
             // A caller that edits what it was handed edits its own copy.
             meta.formats?.[0]?.defaultFor?.push('whole');
-            expect(client.getSchemeMeta().formats?.[0]?.defaultFor).toEqual([
-                'part',
-            ]);
+            expect(
+                client.scheme.getSchemeMeta().formats?.[0]?.defaultFor,
+            ).toEqual(['part']);
             client.destroy();
         });
 
@@ -459,7 +507,7 @@ describe('connectContext: named/versioned context connections', () => {
                 contextVersion: '1.0.0',
             });
 
-            const meta = client.getSchemeMeta();
+            const meta = client.scheme.getSchemeMeta();
             expect(meta.defaultPartRenderFormat).toBe('short');
             expect(meta.defaultWholeRenderFormat).toBe('long');
             // Nothing is invented for a scheme without surfaces: no view
@@ -468,13 +516,15 @@ describe('connectContext: named/versioned context connections', () => {
             expect(meta.formats?.[0]).not.toHaveProperty('defaultFor');
             expect(meta.formats?.[0]).not.toHaveProperty('outputView');
             expect(meta.formats?.[0]).not.toHaveProperty('role');
-            expect(client.getScheme().formats[0]).not.toHaveProperty(
+            expect(client.scheme.getScheme().formats[0]).not.toHaveProperty(
                 'defaultFor',
             );
-            expect(client.getScheme().formats[0]).not.toHaveProperty(
+            expect(client.scheme.getScheme().formats[0]).not.toHaveProperty(
                 'outputView',
             );
-            expect(client.getScheme().formats[0]).not.toHaveProperty('role');
+            expect(client.scheme.getScheme().formats[0]).not.toHaveProperty(
+                'role',
+            );
             client.destroy();
         });
 
@@ -506,7 +556,7 @@ describe('connectContext: named/versioned context connections', () => {
                 contextVersion: '1.0.0',
             });
 
-            expect(client.getScheme().defaultRenderFormat).toBe('short');
+            expect(client.scheme.getScheme().defaultRenderFormat).toBe('short');
             client.destroy();
         });
 
@@ -519,9 +569,11 @@ describe('connectContext: named/versioned context connections', () => {
                 contextId: 'acme-prod',
                 contextVersion: '1.0.0',
             });
-            expect(client.getSchemeMeta().id).toBe('levels');
-            expect(client.getSchemeMeta().defaultRenderFormat).toBe('default');
-            expect(client.getSchemeMeta().formats).toEqual([
+            expect(client.scheme.getSchemeMeta().id).toBe('levels');
+            expect(client.scheme.getSchemeMeta().defaultRenderFormat).toBe(
+                'default',
+            );
+            expect(client.scheme.getSchemeMeta().formats).toEqual([
                 {
                     id: 'default',
                     surface: 'marking',
@@ -531,7 +583,7 @@ describe('connectContext: named/versioned context connections', () => {
                     separator: ' ',
                 },
             ]);
-            expect(client.getScheme().formats).toEqual([
+            expect(client.scheme.getScheme().formats).toEqual([
                 {
                     id: 'default',
                     surface: 'marking',
@@ -542,8 +594,8 @@ describe('connectContext: named/versioned context connections', () => {
                     syntax: { type: 'text' },
                 },
             ]);
-            expect(client.getScheme().id).toBe('levels');
-            expect(client.listCategories()).toEqual([]);
+            expect(client.scheme.getScheme().id).toBe('levels');
+            expect(client.scheme.listCategories()).toEqual([]);
             client.destroy();
         });
 
@@ -589,7 +641,7 @@ describe('connectContext: named/versioned context connections', () => {
                 contextId: 'acme-prod',
                 contextVersion: '1.0.0',
             });
-            expect(client.getConceptsInCategory('date')).toMatchObject([
+            expect(client.scheme.getConceptsInCategory('date')).toMatchObject([
                 {
                     citation: 'Source section 3',
                     notices: [notice],
@@ -659,17 +711,18 @@ describe('connectContext: named/versioned context connections', () => {
     // dedicated ContextNotFoundError subclass. Callers check `err instanceof EzClassifyError && err.status === 404`.
     // -----------------------------------------------------------------------
     describe('404 context-not-found handling', () => {
-        it('connect() throws EzClassifyError when health returns 404', async () => {
+        it('connectContext() throws EzClassifyError when health returns 404', async () => {
             fetchMock.mockResolvedValue(mockResponse(404, 'Not Found'));
             await expect(
-                EzClassifyClient.connect('https://api.example.com', {
+                connectContext({
+                    baseUrl: 'https://api.example.com',
                     contextId: 'missing-ctx',
                     contextVersion: '0.1.0',
                 }),
             ).rejects.toThrow(EzClassifyError);
         });
 
-        it('connect() 404 error carries .status === 404', async () => {
+        it('connectContext() 404 error carries .status === 404', async () => {
             fetchMock.mockResolvedValue(
                 mockResponse(
                     404,
@@ -678,7 +731,8 @@ describe('connectContext: named/versioned context connections', () => {
             );
             let caught: EzClassifyError | null = null;
             try {
-                await EzClassifyClient.connect('https://api.example.com', {
+                await connectContext({
+                    baseUrl: 'https://api.example.com',
                     contextId: 'missing-ctx',
                     contextVersion: '0.1.0',
                 });
@@ -905,10 +959,8 @@ describe('connectContext: named/versioned context connections', () => {
                                     contextId: 'acme-prod',
                                     resolvedVersion: state.version,
                                     artifacts: [],
-                                    sources: [],
                                 },
                                 result: corpusResult('ctx-scheme-process.ok'),
-                                operationLimitations: [],
                             }
                           : url.includes('/v1/ctx/')
                             ? { ...CTX_DESCRIBE, version: state.version }
@@ -948,7 +1000,7 @@ describe('connectContext: named/versioned context connections', () => {
                         'https://api.example.com/v1/ctx/acme-prod/1.1.0/scheme',
                     ),
                 ),
-            ).toHaveLength(7);
+            ).toHaveLength(6);
             expect(
                 warn.mock.calls.filter(([message]) =>
                     String(message).includes('resolved to 1.1.0'),
@@ -995,7 +1047,7 @@ describe('connectContext: named/versioned context connections', () => {
                 contextVersion: 'latest',
             });
 
-            const stale = client.getScheme();
+            const stale = client.scheme.getScheme();
             state.version = '1.1.0';
             const healthy = fetchMock.getMockImplementation()!;
             fetchMock.mockImplementation((url: string, init: RequestInit) =>
@@ -1010,7 +1062,7 @@ describe('connectContext: named/versioned context connections', () => {
 
             // The synchronous surface still answers, which is the only thing it
             // can do when the replacement did not arrive.
-            expect(client.getScheme()).toBe(stale);
+            expect(client.scheme.getScheme()).toBe(stale);
             expect(
                 warn.mock.calls.filter(([message]) =>
                     String(message).includes('still in use'),

@@ -63,6 +63,7 @@ export type BindingName =
     | 'ctx:ez-full-bad-credential'
     | 'ctx:ez-full-no-carrier'
     | 'ctx:ez-gated'
+    | 'ctx:ez-marked'
     | 'ctx:ez-minimal'
     | 'ctx:ez-presets'
     | 'ctx:ez-release'
@@ -70,10 +71,6 @@ export type BindingName =
 
 /**
  * Build the client a driver runs against.
- *
- * The heartbeat is off in every binding: a background health poll would put a
- * request on the wire that no case expects, and the poll has nothing to keep
- * warm against a recording.
  *
  * The base URL is an argument because the same drivers run twice. In the fast
  * lane they run against an in-process transport at a URL nothing dials; in the
@@ -91,7 +88,7 @@ export function buildClient(
     baseUrl: string,
     fetchImpl?: typeof fetch,
 ): EzClassifyClient {
-    const shared = { heartbeat: false, ...(fetchImpl ? { fetchImpl } : {}) };
+    const shared = { ...(fetchImpl ? { fetchImpl } : {}) };
     switch (binding) {
         case 'open':
             return new EzClassifyClient(baseUrl, shared);
@@ -139,6 +136,13 @@ export function buildClient(
             return new EzClassifyClient(baseUrl, {
                 ...shared,
                 contextId: 'ez-gated',
+                contextToken: CONTEXT_CARRIER,
+                contextVersion: '1.0.0',
+            });
+        case 'ctx:ez-marked':
+            return new EzClassifyClient(baseUrl, {
+                ...shared,
+                contextId: 'ez-marked',
                 contextToken: CONTEXT_CARRIER,
                 contextVersion: '1.0.0',
             });
@@ -421,13 +425,12 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
             'ctx-scheme-concepts.full',
             'ctx-scheme-categories.full',
             'ctx-scheme-formats.full',
-            'ctx-scheme-grammar.full',
             'ctx-scheme-scopes.full',
             'ctx-scheme-label-presets.full',
         ],
         run: async (client) => ({
             description: await client.describeContext(),
-            profile: await client.fetchProfile(),
+            profile: await client.scheme.fetchProfile(),
             schemes: await client.describeSchemes(),
         }),
         verify: (outcome, recorded) => {
@@ -510,13 +513,38 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
 
     // A Context that declares a crosswalk: the description names it with the
     // version it was declared at and the version it resolved to. The scheme
-    // inventory names the crosswalk's target as a held scheme.
+    // inventory names the crosswalk's target as a held scheme, and the view
+    // that inventory hands out marks in that scheme: process, validate and
+    // aggregate each go out with `?scheme=ez-gated` and answer there.
     'ctx-describe.crosswalks': {
         binding: 'ctx:ez-crosswalk',
-        cases: ['ctx-describe.crosswalks'],
-        run: (client) => client.describeContext(),
+        cases: [
+            'ctx-describe.crosswalks',
+            'ctx-scheme-process.selected-scheme',
+            'ctx-scheme-validate.selected-scheme',
+            'ctx-scheme-aggregate.selected-scheme',
+        ],
+        run: async (client) => {
+            const description = await client.describeContext();
+            const target = client.schemes.get('ez-gated');
+            return {
+                description,
+                processed: await target.process('SENSITIVE / EXPORT'),
+                validated: await target.validate('SENSITIVE / EXPORT'),
+                aggregated: await target.aggregate([
+                    'OPEN / EXPORT',
+                    'SENSITIVE',
+                ]),
+            };
+        },
         verify: (outcome, recorded) => {
-            const description = resolved(outcome) as Record<string, unknown>;
+            const answer = resolved(outcome) as {
+                description: Record<string, unknown>;
+                processed: unknown;
+                validated: unknown;
+                aggregated: unknown;
+            };
+            const description = answer.description;
             const wire = body(recorded, 'ctx-describe.crosswalks');
             equals(
                 description['crosswalks'],
@@ -529,6 +557,35 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
                 wire['schemes'],
                 'the held-scheme inventory, crosswalk target included',
             );
+            equals(
+                answer.processed,
+                result(recorded, 'ctx-scheme-process.selected-scheme'),
+                'process through the target view answers in the target scheme',
+            );
+            equals(
+                answer.validated,
+                result(recorded, 'ctx-scheme-validate.selected-scheme'),
+                'validate through the target view answers in the target scheme',
+            );
+            equals(
+                answer.aggregated,
+                result(recorded, 'ctx-scheme-aggregate.selected-scheme'),
+                'aggregate through the target view answers in the target scheme',
+            );
+        },
+    },
+
+    // The marked documents change nothing a description names.
+    'ctx-describe.marked': {
+        binding: 'ctx:ez-marked',
+        cases: ['ctx-describe.marked'],
+        run: (client) => client.describeContext(),
+        verify: (outcome, recorded) => {
+            const description = resolved(outcome) as Record<string, unknown>;
+            const wire = body(recorded, 'ctx-describe.marked');
+            for (const member of ['guides', 'access', 'crosswalks'] as const) {
+                equals(description[member], wire[member], `the ${member}`);
+            }
         },
     },
 
@@ -568,27 +625,9 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
         },
     ),
 
-    'ctx-document-assess-access.ok': {
-        binding: 'ctx:ez-full',
-        cases: ['ctx-document-assess-access.ok'],
-        run: (client) =>
-            client.context.assessDocumentAccess({
-                responseProfile: 'standard',
-                text: 'OPEN\nThis document is releasable.',
-                userAttributes: { clearance: 'OPEN' },
-                context: requestContext('ctx-document-assess-access.ok'),
-            }),
-        verify: (outcome, recorded) =>
-            equals(
-                resolved(outcome),
-                body(recorded, 'ctx-document-assess-access.ok'),
-                'the document assessment keeps the resolved Context envelope whole',
-            ),
-    },
-
     // -- scheme resources under a Context ----------------------------------
 
-    // The eight-request warm a context-bound connect runs, replayed as one
+    // The six-request warm a context-bound connect runs, replayed as one
     // exchange. This is the driver the whole ctx scheme resource family exists
     // for: a browser cannot render until this assembly answers, and asserting
     // the pieces separately would prove the routes reply without proving the
@@ -601,13 +640,12 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
             'ctx-scheme-concepts.ok',
             'ctx-scheme-categories.ok',
             'ctx-scheme-formats.ok',
-            'ctx-scheme-grammar.ok',
             'ctx-scheme-scopes.ok',
             'ctx-scheme-label-presets.ok',
         ],
         run: async (client) => ({
-            profile: await client.fetchProfile(),
-            meta: client.getSchemeMeta(),
+            profile: await client.scheme.fetchProfile(),
+            meta: client.scheme.getSchemeMeta(),
         }),
         verify: (outcome, recorded) => {
             const { profile, meta } = resolved(outcome) as {
@@ -720,25 +758,6 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
         (client) => client.scheme.explain('OPEN'),
     ),
 
-    // The envelope's result is itself `{ result: "<marking>" }`, so a
-    // context-bound caller is two layers away from the string the method
-    // promises. Both layers are peeled inside the cached call.
-    'ctx-scheme-normalize.ok': {
-        binding: 'ctx:ez-full',
-        cases: ['ctx-scheme-normalize.ok'],
-        run: (client) => client.scheme.normalize('open'),
-        verify: (outcome, recorded) =>
-            equals(
-                resolved(outcome),
-                (
-                    result(recorded, 'ctx-scheme-normalize.ok') as {
-                        result: string;
-                    }
-                ).result,
-                'normalize under a Context must still hand back the plain marking',
-            ),
-    },
-
     'ctx-scheme-render.ok': {
         binding: 'ctx:ez-full',
         cases: ['ctx-scheme-render.ok'],
@@ -803,40 +822,18 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
         (client) => client.scheme.buildSchemeView(),
     ),
 
+    // A self-marked scheme's whole rides on its structural view.
+    'ctx-scheme-view.marked': passthrough(
+        'ctx:ez-marked',
+        'ctx-scheme-view.marked',
+        (client) => client.scheme.buildSchemeView(),
+    ),
+
     'ctx-scheme-notices.ok': passthrough(
         'ctx:ez-full',
         'ctx-scheme-notices.ok',
         (client) => client.scheme.collectNotices([OPEN_ASSERTION]),
     ),
-
-    'ctx-scheme-filter-concepts.ok': {
-        binding: 'ctx:ez-full',
-        cases: ['ctx-scheme-filter-concepts.ok'],
-        run: (client) => client.scheme.filterConcepts('open'),
-        verify: (outcome, recorded) => {
-            const wire = result(recorded, 'ctx-scheme-filter-concepts.ok') as {
-                visibleIds: string[];
-            };
-            const parsed = resolved(outcome) as { visibleIds: Set<string> };
-            equals(
-                [...parsed.visibleIds],
-                wire.visibleIds,
-                'filtering under a Context must hydrate the ids inside the envelope',
-            );
-        },
-    },
-
-    'ctx-scheme-filter-concepts.no-match': {
-        binding: 'ctx:ez-full',
-        cases: ['ctx-scheme-filter-concepts.no-match'],
-        run: (client) => client.scheme.filterConcepts('zzznomatch'),
-        verify: (outcome) => {
-            const parsed = resolved(outcome) as { visibleIds: Set<string> };
-            if (parsed.visibleIds.size !== 0) {
-                throw new Error('a query matching nothing came back with ids');
-            }
-        },
-    },
 
     'ctx-scheme-scan.ok': passthrough(
         'ctx:ez-full',
@@ -988,18 +985,17 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
             ),
     ),
 
-    'ctx-access-describe-rule.ok': passthrough(
-        'ctx:ez-full',
-        'ctx-access-describe-rule.ok',
-        (client) => client.access.describeAccessRule('level-rule'),
-    ),
-
-    'ctx-access-describe-requirements.ok': passthrough(
-        'ctx:ez-full',
-        'ctx-access-describe-requirements.ok',
-        (client) =>
-            client.access.describeAccessRequirements({ marking: 'OPEN' }),
-    ),
+    'ctx-access-describe-requirements.ok': {
+        binding: 'ctx:ez-full',
+        cases: ['ctx-access-describe-requirements.ok'],
+        run: (client) => client.context.accessRequirements({ marking: 'OPEN' }),
+        verify: (outcome, recorded) =>
+            equals(
+                resolved(outcome),
+                body(recorded, 'ctx-access-describe-requirements.ok'),
+                'context.accessRequirements keeps the resolved Context envelope',
+            ),
+    },
 
     'ctx-access-rules.ok': {
         binding: 'ctx:ez-full',
@@ -1010,6 +1006,19 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
                 resolved(outcome),
                 body(recorded, 'ctx-access-rules.ok')['rules'],
                 'the rule list is read off the recorded `rules` array',
+            ),
+    },
+
+    // The policy's own marking is read off the rules body, not off a rule.
+    'ctx-access-rules.marked': {
+        binding: 'ctx:ez-marked',
+        cases: ['ctx-access-rules.marked'],
+        run: (client) => client.access.describeAccessMarking(),
+        verify: (outcome, recorded) =>
+            equals(
+                resolved(outcome),
+                body(recorded, 'ctx-access-rules.marked')['marking'],
+                "the policy marking is the recorded body's",
             ),
     },
 
@@ -1038,55 +1047,25 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
         (client) => client.guide.evaluate('ez-test', ['rule-sensitive']),
     ),
 
-    'ctx-guide-evaluate.all-guides': passthrough(
+    'ctx-guide-evaluate.selections': passthrough(
         'ctx:ez-full',
-        'ctx-guide-evaluate.all-guides',
-        (client) => client.guide.evaluateMany(['rule-sensitive']),
-    ),
-
-    'ctx-guide-describe-rule.ok': passthrough(
-        'ctx:ez-full',
-        'ctx-guide-describe-rule.ok',
-        (client) => client.guide.describeRule('rule-sensitive'),
-    ),
-
-    'ctx-guide-describe-rule.unknown-guide': failure(
-        'ctx:ez-full',
-        'ctx-guide-describe-rule.unknown-guide',
+        'ctx-guide-evaluate.selections',
         (client) =>
-            client.guide.describeRule('rule-sensitive', 'no-such-guide'),
-        (error) => {
-            if (error.status !== 404) {
-                throw new Error(`expected 404, got ${String(error.status)}`);
-            }
-            if (error.possiblyUnauthenticated) {
-                throw new Error(
-                    'a named missing guide is a resource answer, not a suspected denial',
-                );
-            }
-        },
+            client.guide.evaluateMany([
+                { guideId: 'ez-test', ruleId: 'rule-sensitive' },
+            ]),
     ),
-
-    'ctx-guide-filter-rules.ok': {
-        binding: 'ctx:ez-full',
-        cases: ['ctx-guide-filter-rules.ok'],
-        run: (client) => client.guide.filterRules('sensitive'),
-        verify: (outcome, recorded) => {
-            const wire = result(recorded, 'ctx-guide-filter-rules.ok') as {
-                visibleIds: string[];
-            };
-            const parsed = resolved(outcome) as { visibleIds: Set<string> };
-            equals(
-                [...parsed.visibleIds],
-                wire.visibleIds,
-                'filterRules must hydrate the recorded ids into a Set',
-            );
-        },
-    },
 
     'ctx-guide-view.ok': passthrough(
         'ctx:ez-full',
         'ctx-guide-view.ok',
+        (client) => client.guide.buildGuideView(),
+    ),
+
+    // A marked guide's whole rides on its view, and no rule carries a part.
+    'ctx-guide-view.marked': passthrough(
+        'ctx:ez-marked',
+        'ctx-guide-view.marked',
         (client) => client.guide.buildGuideView(),
     ),
 
@@ -1184,6 +1163,51 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
             ),
     },
 
+    // The crosswalk inventory is its own read, answered as `{ crosswalks }`
+    // rather than under the Context envelope; the caller gets the list.
+    'ctx-crosswalk-describe.ok': {
+        binding: 'ctx:ez-crosswalk',
+        cases: ['ctx-crosswalk-describe.ok'],
+        run: (client) => client.describeCrosswalks(),
+        verify: (outcome, recorded) =>
+            equals(
+                resolved(outcome),
+                body(recorded, 'ctx-crosswalk-describe.ok')['crosswalks'],
+                'the crosswalk list is read off the recorded `crosswalks` array',
+            ),
+    },
+
+    // A crosswalk document's whole marking rides on its descriptor, and the
+    // parts it gives each mapping never reach the wire.
+    'ctx-crosswalk-describe.marked': {
+        binding: 'ctx:ez-marked',
+        cases: ['ctx-crosswalk-describe.marked'],
+        run: (client) => client.describeCrosswalks(),
+        verify: (outcome, recorded) =>
+            equals(
+                resolved(outcome),
+                body(recorded, 'ctx-crosswalk-describe.marked')['crosswalks'],
+                'the descriptor carries the recorded whole marking',
+            ),
+    },
+
+    // A candidate that lost a selection is its own disposition, not an omit.
+    'ctx-crosswalk-translate.not-selected': {
+        binding: 'ctx:ez-marked',
+        cases: ['ctx-crosswalk-translate.not-selected'],
+        run: (client) =>
+            client.context.translate({
+                crosswalkId: 'ez-gated-to-ez-test',
+                marking: 'SENSITIVE / EXPORT',
+            }),
+        verify: (outcome, recorded) =>
+            equals(
+                resolved(outcome),
+                body(recorded, 'ctx-crosswalk-translate.not-selected'),
+                'a losing candidate stays `not-selected` under the envelope',
+            ),
+    },
+
     // Facts travel as facts alone, with their caller provenance unchanged.
     'ctx-scheme-suggest.facts': passthrough(
         'ctx:ez-full',
@@ -1230,106 +1254,6 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
         (client) =>
             client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/suggest', {}),
     ),
-    'ctx-scheme-process.undeclared-request-field-fix': recordedRefusal(
-        'ctx-scheme-process.undeclared-request-field-fix',
-        (client) =>
-            client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/process', {
-                fix: true,
-                input: 'OPEN',
-            }),
-    ),
-    'ctx-scheme-process.undeclared-request-field-preserveDeprecated':
-        recordedRefusal(
-            'ctx-scheme-process.undeclared-request-field-preserveDeprecated',
-            (client) =>
-                client._request(
-                    'POST',
-                    '/v1/ctx/ez-full/1.0.0/scheme/process',
-                    {
-                        input: 'OPEN',
-                        preserveDeprecated: true,
-                    },
-                ),
-        ),
-    'ctx-scheme-process.undeclared-request-field-normalization':
-        recordedRefusal(
-            'ctx-scheme-process.undeclared-request-field-normalization',
-            (client) =>
-                client._request(
-                    'POST',
-                    '/v1/ctx/ez-full/1.0.0/scheme/process',
-                    {
-                        input: 'OPEN',
-                        normalization: 'strict',
-                    },
-                ),
-        ),
-    'ctx-scheme-process.undeclared-request-field-skipRepair': recordedRefusal(
-        'ctx-scheme-process.undeclared-request-field-skipRepair',
-        (client) =>
-            client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/process', {
-                input: 'OPEN',
-                skipRepair: true,
-            }),
-    ),
-    'ctx-scheme-process.undeclared-request-field-skipInference':
-        recordedRefusal(
-            'ctx-scheme-process.undeclared-request-field-skipInference',
-            (client) =>
-                client._request(
-                    'POST',
-                    '/v1/ctx/ez-full/1.0.0/scheme/process',
-                    {
-                        input: 'OPEN',
-                        skipInference: true,
-                    },
-                ),
-        ),
-    'ctx-scheme-process.undeclared-request-field-tolerant': recordedRefusal(
-        'ctx-scheme-process.undeclared-request-field-tolerant',
-        (client) =>
-            client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/process', {
-                input: 'OPEN',
-                tolerant: true,
-            }),
-    ),
-    'ctx-scheme-process.undeclared-request-field-validateOnly': recordedRefusal(
-        'ctx-scheme-process.undeclared-request-field-validateOnly',
-        (client) =>
-            client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/process', {
-                input: 'OPEN',
-                validateOnly: true,
-            }),
-    ),
-    'ctx-scheme-process.undeclared-request-field-scope': recordedRefusal(
-        'ctx-scheme-process.undeclared-request-field-scope',
-        (client) =>
-            client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/process', {
-                input: 'OPEN',
-                scope: 'banner',
-            }),
-    ),
-    'ctx-scheme-process.undeclared-request-field-format': recordedRefusal(
-        'ctx-scheme-process.undeclared-request-field-format',
-        (client) =>
-            client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/process', {
-                format: 'default',
-                input: 'OPEN',
-            }),
-    ),
-    'ctx-scheme-process.undeclared-request-field-repairStrategy':
-        recordedRefusal(
-            'ctx-scheme-process.undeclared-request-field-repairStrategy',
-            (client) =>
-                client._request(
-                    'POST',
-                    '/v1/ctx/ez-full/1.0.0/scheme/process',
-                    {
-                        input: 'OPEN',
-                        repairStrategy: 'first',
-                    },
-                ),
-        ),
     'ctx-scheme-process.undeclared-request-field-unknownField': recordedRefusal(
         'ctx-scheme-process.undeclared-request-field-unknownField',
         (client) =>
@@ -1350,14 +1274,6 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
         'ctx-scheme-explain.undeclared-field',
         (client) =>
             client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/explain', {
-                input: 'OPEN',
-                unknownField: true,
-            }),
-    ),
-    'ctx-scheme-normalize.undeclared-field': recordedRefusal(
-        'ctx-scheme-normalize.undeclared-field',
-        (client) =>
-            client._request('POST', '/v1/ctx/ez-full/1.0.0/scheme/normalize', {
                 input: 'OPEN',
                 unknownField: true,
             }),
@@ -1424,9 +1340,16 @@ export const WIRE_DRIVERS: Readonly<Record<string, WireDriver>> = {
         (client) =>
             client._request(
                 'GET',
-                '/v1/ctx/ez-presets/1.0.0/scheme/label-presets?scheme=ez-presets',
+                '/v1/ctx/ez-presets/1.0.0/scheme/label-presets?layers=ez-layer',
             ),
         'ctx:ez-presets',
+    ),
+    // The server is the authority on keys: its 404 for one the Context does
+    // not hold is the proof that it never answers from the primary instead.
+    'ctx-scheme-process.unknown-scheme': recordedRefusal(
+        'ctx-scheme-process.unknown-scheme',
+        (client) => client.schemes.get('no-such-scheme').process('OPEN'),
+        'ctx:ez-crosswalk',
     ),
     'ctx-scheme-process.undeclared-query-parameter': recordedRefusal(
         'ctx-scheme-process.undeclared-query-parameter',
@@ -1614,9 +1537,9 @@ export const EXCLUDED_CASES: Readonly<Record<string, string>> = {
         'deployment concern answered by an orchestrator, not by an SDK caller.',
 
     'ctx-scheme-summary.layered':
-        'Reached only inside the composite profile warm, which asks for seven sub-resources at ' +
+        'Reached only inside the composite profile warm, which asks for six sub-resources at ' +
         'once. This one is recorded against the layered context to pin composition, and the ' +
-        'other six legs of that context are not recorded, so no client call can complete the ' +
+        'other five legs of that context are not recorded, so no client call can complete the ' +
         'fetch there. ctx-scheme.profile covers the assembly against ez-presets.',
     'ctx-scheme-concepts.layered':
         'Reached only inside the composite profile warm. See ctx-scheme-summary.layered.',
@@ -1624,7 +1547,7 @@ export const EXCLUDED_CASES: Readonly<Record<string, string>> = {
         'Reached only inside the composite profile warm. See ctx-scheme-summary.layered.',
     'ctx-scheme-scopes.none':
         'Reached only inside the composite profile warm, and recorded against ez-minimal to pin ' +
-        'the null answer while the other six legs of that context are not recorded. See ' +
+        'the null answer while the other five legs of that context are not recorded. See ' +
         'ctx-scheme-summary.layered.',
 
     'ctx-scheme-validate.both-sources':

@@ -4,13 +4,13 @@ layer. */
 /**
  * Tests for SchemeState base class profile query methods.
  *
- * SchemeState is abstract: we exercise it through EzClassifyClient, which
+ * SchemeState is abstract: we exercise it through SchemeProfileState, which
  * extends it and provides the concrete _loadProfile() implementation. All tests
  * inject a profile directly via `(c as any)._profile` to isolate the profile
  * query logic from the HTTP layer.
  */
 import { describe, it, expect } from 'vitest';
-import { EzClassifyClient } from '../src/ezclassify-client';
+import { SchemeProfileState } from '../src/client-ops';
 import { EzClassifyError } from '../src/errors';
 
 /** The formats a scheme profile carries: the wire's format views. */
@@ -134,6 +134,11 @@ const PROFILE = {
     parse: { separator: '//', caseSensitive: false, stripWhitespace: true },
 };
 
+/** Install a profile the way a fetch does. */
+function installProfile(c: SchemeProfileState, view: unknown): void {
+    (c as any)._setActiveProfile({ view });
+}
+
 /**
  * Build a client with the fixture profile pre-loaded. `overrides` merges extra
  * profile fields for tests that need a shape the base fixture omits (scopes,
@@ -141,9 +146,9 @@ const PROFILE = {
  */
 function clientWithProfile(
     overrides?: Record<string, unknown>,
-): EzClassifyClient {
-    const c = new EzClassifyClient('https://api.example.com');
-    (c as any)._setActiveProfile({ ...PROFILE, ...(overrides ?? {}) });
+): SchemeProfileState {
+    const c = new SchemeProfileState();
+    installProfile(c, { ...PROFILE, ...(overrides ?? {}) });
     return c;
 }
 
@@ -152,13 +157,13 @@ function clientWithProfile(
 // -----------------------------------------------------------------------
 describe('SchemeState: load/unload bookkeeping', () => {
     it('_profile is null on a fresh client', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         expect((c as any)._profile).toBeNull();
     });
 
     it('_setActiveProfile stores the profile and invalidates the concept map cache', () => {
-        const c = new EzClassifyClient('https://api.example.com');
-        (c as any)._setActiveProfile(PROFILE);
+        const c = new SchemeProfileState();
+        installProfile(c, PROFILE);
         expect((c as any)._profile).toBe(PROFILE);
         // Cache should be cleared after a profile swap
         expect((c as any)._conceptMapCache).toBeNull();
@@ -168,6 +173,7 @@ describe('SchemeState: load/unload bookkeeping', () => {
         const c = clientWithProfile();
         (c as any)._setActiveProfile(null);
         expect((c as any)._profile).toBeNull();
+        expect(() => c.getScheme()).toThrow(EzClassifyError);
     });
 
     it('findConcept lazily builds the concept map cache', () => {
@@ -198,7 +204,7 @@ describe('SchemeState: load/unload bookkeeping', () => {
     });
 
     it('getSchemeMeta throws when no profile is loaded', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         expect(() => c.getSchemeMeta()).toThrow(EzClassifyError);
         expect(() => c.getSchemeMeta()).toThrow(/No profile cached/);
     });
@@ -392,7 +398,7 @@ describe('SchemeState.listCategories()', () => {
     });
 
     it('throws when no profile is loaded', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         expect(() => c.listCategories()).toThrow(EzClassifyError);
     });
 });
@@ -616,7 +622,7 @@ describe('SchemeState.findConcept()', () => {
 
     it('view lookup takes priority over alias lookup', () => {
         const c = clientWithProfile();
-        (c as any)._setActiveProfile({
+        installProfile(c, {
             ...PROFILE,
             concepts: [
                 {
@@ -638,7 +644,7 @@ describe('SchemeState.findConcept()', () => {
 
     it('resolves a duplicated view value to the first concept that declares it', () => {
         const c = clientWithProfile();
-        (c as any)._setActiveProfile({
+        installProfile(c, {
             ...PROFILE,
             concepts: [
                 {
@@ -661,7 +667,7 @@ describe('SchemeState.findConcept()', () => {
     it('answers from the new profile after a swap, not the old index', () => {
         const c = clientWithProfile();
         expect(c.findConcept('UNCLASSIFIED')!.id).toBe('U');
-        (c as any)._setActiveProfile({
+        installProfile(c, {
             ...PROFILE,
             concepts: [
                 {
@@ -757,7 +763,7 @@ describe('SchemeState.uncoveredAssertions()', () => {
 
     it('treats hierarchyRoot:true category as rank-ordered', () => {
         // hierarchyRoot is the other flag (besides rollup:max) that enables rank coverage
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -820,7 +826,7 @@ describe('SchemeState.uncoveredAssertions()', () => {
 // -----------------------------------------------------------------------
 describe('SchemeState.getConceptsInCategory(): sort variants', () => {
     it('sorts alphabetically when sort = "alphabetical"', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -869,7 +875,7 @@ describe('SchemeState.getConceptsInCategory(): sort variants', () => {
     });
 
     it('sorts numerically when sort = "numeric" using views.default', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -915,7 +921,7 @@ describe('SchemeState.getConceptsInCategory(): sort variants', () => {
     });
 
     it('sort as an array (["position"]) applies position sorting', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -964,7 +970,7 @@ describe('SchemeState.getConceptsInCategory(): sort variants', () => {
     });
 
     it('returns unsorted (insertion order) when category has no sort config', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1018,7 +1024,7 @@ describe('SchemeState.getConceptsInCategory(): sort variants', () => {
 // -----------------------------------------------------------------------
 describe('SchemeState.getSchemeMeta(): optional fields', () => {
     it('maps scopes to {id, label} pairs', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             scopes: [
@@ -1040,7 +1046,7 @@ describe('SchemeState.getSchemeMeta(): optional fields', () => {
     });
 
     it('description is undefined when not set on the profile', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = { ...PROFILE, description: undefined };
         const meta = c.getSchemeMeta();
         expect(meta.description).toBeUndefined();
@@ -1097,7 +1103,7 @@ describe('SchemeState.getConceptsInCategory(): nested, edge cases', () => {
     it('orphan concept (parent outside category) lands at depth 0', () => {
         // Child refers to parent 'EXT' which is not in the same category.
         // isRoot(child) should be true → child gets depth 0.
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1139,7 +1145,7 @@ describe('SchemeState.getConceptsInCategory(): nested, edge cases', () => {
     });
 
     it('DFS visits all concepts even with a multi-child root', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1199,7 +1205,7 @@ describe('SchemeState.getConceptsInCategory(): nested, edge cases', () => {
 // -----------------------------------------------------------------------
 describe('SchemeState.getConceptsInCategory(): sort fallbacks', () => {
     it('unknown sort type leaves insertion order unchanged', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1240,7 +1246,7 @@ describe('SchemeState.getConceptsInCategory(): sort fallbacks', () => {
     });
 
     it('position sort treats a missing position as 0', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1291,7 +1297,7 @@ describe('SchemeState.getConceptsInCategory(): sort fallbacks', () => {
     });
 
     it('numeric sort treats missing and non-numeric default views as 0', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1343,8 +1349,8 @@ describe('SchemeState.getConceptsInCategory(): sort fallbacks', () => {
 // -----------------------------------------------------------------------
 describe('SchemeState.getConceptsInCategory(): nested, parent cycles', () => {
     /** A profile with a single union category and the given concepts. */
-    function cycleClient(concepts: unknown[]): EzClassifyClient {
-        const c = new EzClassifyClient('https://api.example.com');
+    function cycleClient(concepts: unknown[]): SchemeProfileState {
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts,
@@ -1462,7 +1468,7 @@ describe('SchemeState.uncoveredAssertions(): rank resolution', () => {
     };
 
     it('a concept with no declared rank is not covered by display position', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1497,7 +1503,7 @@ describe('SchemeState.uncoveredAssertions(): rank resolution', () => {
     });
 
     it('a candidate whose concept the profile does not carry stays uncovered', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1524,7 +1530,7 @@ describe('SchemeState.uncoveredAssertions(): rank resolution', () => {
     });
 
     it('a parent with no declared rank covers nothing', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1558,7 +1564,7 @@ describe('SchemeState.uncoveredAssertions(): rank resolution', () => {
     });
 
     it('a parent in a different category never covers a candidate', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             concepts: [
@@ -1608,13 +1614,13 @@ describe('SchemeState.uncoveredAssertions(): rank resolution', () => {
 // -----------------------------------------------------------------------
 describe('SchemeState.uncoveredAssertions(): degenerate profile shapes', () => {
     it('tolerates a profile with null concepts and categories', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = { concepts: null, categories: null };
         expect(c.uncoveredAssertions([], [])).toEqual([]);
     });
 
     it('returns all candidates as uncovered when no categories exist to establish rank order', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = { concepts: null, categories: null };
 
         const candidates = [
@@ -1634,35 +1640,18 @@ describe('SchemeState.uncoveredAssertions(): degenerate profile shapes', () => {
 // -----------------------------------------------------------------------
 describe('SchemeState.getScheme()', () => {
     it('returns the cached Context profile', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = { ...PROFILE, id: 'my-id' };
         expect(c.getScheme().id).toBe('my-id');
     });
 });
 
 // -----------------------------------------------------------------------
-// getSchemeMeta: license, type, and absent formats
+// getSchemeMeta: absent formats and reference label
 // -----------------------------------------------------------------------
-describe('SchemeState.getSchemeMeta(): license, type, absent formats', () => {
-    it('forwards the license field when present on the profile', () => {
-        const c = new EzClassifyClient('https://api.example.com');
-        (c as any)._profile = { ...PROFILE, license: 'proprietary' };
-        expect(c.getSchemeMeta().license).toBe('proprietary');
-    });
-
-    it('license is undefined when absent', () => {
-        const c = clientWithProfile();
-        expect(c.getSchemeMeta().license).toBeUndefined();
-    });
-
-    it('forwards type when present on the profile (layer vs. scheme)', () => {
-        const c = new EzClassifyClient('https://api.example.com');
-        (c as any)._profile = { ...PROFILE, type: 'layer' };
-        expect(c.getSchemeMeta().type).toBe('layer');
-    });
-
+describe('SchemeState.getSchemeMeta(): absent formats and label', () => {
     it('forwards referenceSurfaceLabel when present on the profile', () => {
-        const c = new EzClassifyClient('https://api.example.com');
+        const c = new SchemeProfileState();
         (c as any)._profile = {
             ...PROFILE,
             referenceSurfaceLabel: {

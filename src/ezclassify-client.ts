@@ -12,12 +12,8 @@
 
 import type {
     Assertion,
-    DiffResult,
-    SuggestResult,
     AccessDecision,
-    ProcessingContext,
-    CoverageReport,
-    ScanOptions,
+    ContextCrosswalkDescriptor,
     ContextSchemeDescriptor,
     ContextSchemeRole,
     RemoteContextAdapter,
@@ -26,39 +22,28 @@ import type {
     CrosswalkTranslationResult,
     DocumentAssessmentInput,
     DocumentAuditReport,
-    DocumentAccessAssessmentInput,
-    DocumentAccessAssessment,
     AccessRequirementsInput,
     AccessRequirementsDescription,
     SchemePublicView,
-    SchemeStructuralView,
-    FilterResult,
-    ConceptDescription,
-    ConceptView,
-    CategoryView,
-    SchemeMetaView,
-    AggregateResult,
-    RenderResult,
-    RenderOptions,
-    ProcessResult,
-    ValidateResult,
-    ExplanationTrace,
-    SuggestResultsByCategory,
-    ScanOutcome,
     MarkingColorRule,
     Vocabulary,
 } from '@ezclassify/types';
-import { SchemeState, deepFreeze } from './scheme-state';
+import { deepFreeze } from './scheme-state';
 import {
-    DEFAULT_CACHE_TTL_MS,
-    MAX_UNPINNED_TTL_MS,
     RequestCache,
     cacheKeyForWireValue,
     wireSnapshot,
 } from './request-cache';
 import { EzClassifyError, ErrorCodes, isDenialShapedBody } from './errors';
 import { CLIENT_SPEC_VERSION } from './spec-version';
-import { SchemeOps, GuideOps, AccessOps, ContextOps } from './client-ops';
+import {
+    ContextSchemes,
+    SchemeProfileState,
+    SchemeOps,
+    GuideOps,
+    AccessOps,
+    ContextOps,
+} from './client-ops';
 import {
     parseContextOperationResult,
     type ContextResultShape,
@@ -192,6 +177,25 @@ function readSchemeInventory(value: unknown): ContextSchemeDescriptor[] {
 }
 
 /**
+ * Profiles for every scheme a Context holds, read at one concrete version and
+ * installed together.
+ */
+interface HeldProfiles {
+    /** The primary scheme's. */
+    primary: ContextSchemeProfile;
+    /** The key the description lists the primary under. */
+    primaryKey: string | undefined;
+    /** Every other held scheme's, by its Context-local key. */
+    others: Map<string, ContextSchemeProfile>;
+}
+
+/** The key a Context description lists its primary scheme under. */
+function primaryKeyOf(description: ContextDescription): string | undefined {
+    return description.schemes.find((held) => held.roles.includes('primary'))
+        ?.selector;
+}
+
+/**
  * Read the `GET /v1/ctx/{ctxId}/{version}` body into {@link ContextDescription}.
  *
  * The wire omits `layers`, `guides`, `crosswalks` and `access` rather than
@@ -285,35 +289,30 @@ export interface ClientAuth {
      * also what earns the single re-resolve-and-replay.
      */
     token: string | AccessTokenSupplier;
-    /**
-     * Called whenever a request looks like it failed on authentication,
-     * whatever kind of token is configured. A host holding a static token still
-     * wants the signal so it can send the user back to sign in.
-     *
-     * With a supplier, the client re-resolves the token and replays the request
-     * once after this returns, so this is also where a host refreshes the
-     * credential its supplier reads. With a string token, or with an
-     * `Authorization` header the caller wrote itself, there is nothing the
-     * client could send differently and the failure stands. Throwing here fails
-     * the request either way.
-     *
-     * The hook and the replay run inside the request's `timeout`. A hook that
-     * is still running when it elapses fails the request with `TIMEOUT`.
-     *
-     * @param error - The failure that looks like an authentication failure
-     */
-    onAuthFailure?: (error: EzClassifyError) => void | Promise<void>;
 }
 
 /** Options for constructing an EzClassifyClient. */
 export interface EzClassifyClientOptions {
     /**
-     * Caller identity: the token to send, and optionally what to do when the
-     * server appears to refuse it.
+     * Caller identity: the token to send.
      *
      * Ignored when `headers` already carries an `Authorization` entry.
      */
     auth?: ClientAuth;
+    /**
+     * The id this application is registered under in Studio. Sent as
+     * `x-ezclassify-application-id` on every Context request so the deployment
+     * can report usage per application. It is a label, not a credential: it
+     * authorizes nothing, and a request without it, or with an id the
+     * deployment has not registered, is served the same way.
+     *
+     * Must be 1 to 128 characters, each a visible ASCII character (`0x21` to
+     * `0x7e`: no spaces, control characters or non-ASCII). The client refuses
+     * any other value at construction. A value outside that grammar would be
+     * served and counted as unidentified. Do not also write the header in
+     * `headers`.
+     */
+    applicationId?: string;
     /**
      * Signed Context authorization envelope carrier. A supplier is called on
      * each Context request so platform-owned renewal requires no client
@@ -323,11 +322,6 @@ export interface EzClassifyClientOptions {
     /**
      * Additional request headers. In bearer mode an `Authorization` header here
      * takes precedence over `auth` and is never overwritten.
-     *
-     * The `x-ezclassify-application-grant` header, in any casing, carries an
-     * application credential and is sent only on `/v1/ctx` requests. Combining
-     * it with caller-written `Authorization`, the Context token header or
-     * `contextToken` throws at construction.
      *
      * Read once, at construction. A bearer token that changes per request
      * belongs in an `auth.token` supplier, which is asked every time.
@@ -349,18 +343,18 @@ export interface EzClassifyClientOptions {
      *
      * A concrete version pins the client to that immutable composition. An
      * omitted version, an empty string, or `latest` leaves it unpinned: the
-     * server resolves the version on every request, cache entries expire on
-     * their TTL, and `cacheAccessDecisions` is refused.
+     * server resolves the version on every request and cache entries expire on
+     * their TTL.
      */
     contextVersion?: string;
     /**
      * Request timeout in milliseconds (default: 30000).
      *
      * One deadline covers the whole request: the `auth.token` and
-     * `contextToken` suppliers, the transport, the response body, the
-     * `auth.onAuthFailure` hook and the single replay. A supplier or hook that
-     * never settles fails the request with `TIMEOUT` once it elapses. The
-     * client stops waiting for that code but cannot stop it running.
+     * `contextToken` suppliers, the transport, the response body and the single
+     * replay. A supplier that never settles fails the request with `TIMEOUT`
+     * once it elapses. The client stops waiting for that code but cannot stop
+     * it running.
      */
     timeout?: number;
     /**
@@ -368,65 +362,6 @@ export interface EzClassifyClientOptions {
      * Tests set this to exercise the wire path directly.
      */
     disableCache?: boolean;
-    /**
-     * Cache TTL for engine-op results in ms (default 5 min). Typeahead
-     * `suggest` responses stay valid while the profile + input are stable, so 5
-     * min is comfortably safe. A few operations use their own TTL: `scan` two
-     * minutes, `describeConcept` and `describeAllAccessRules` one hour.
-     *
-     * Must be a positive, finite number no larger than 3600000 (one hour); the
-     * constructor refuses anything else with `INVALID_INPUT`. An entry on a
-     * `latest` or omitted version can never outlive the hour, because the
-     * composition behind it can change.
-     *
-     * Ignored on a client pinned to `{contextId, contextVersion}`: a published
-     * version is immutable, so its entries are held until they are evicted
-     * rather than expired. See {@link EzClassifyClient.clearCache} for the way
-     * out of a pinned entry.
-     */
-    cacheTtlMs?: number;
-    /**
-     * Cache `access.check` and `context.checkAccess` results like any other
-     * engine op (default `false`: every check goes to the wire).
-     *
-     * Off by default because the round trip is the audit record. The runtime
-     * records each decision against the exact artifact versions that answered
-     * it, and that record is what an accreditation review reads; a decision
-     * served out of this cache never happened as far as the deployment is
-     * concerned. Turning it on is the consumer trading audit completeness for
-     * traffic, and nothing else: the decision itself is already deterministic
-     * under a version pin, so what comes back is what the server would have
-     * said.
-     *
-     * Requires a `{contextId, contextVersion}` pin and a live cache. Under
-     * `latest` or an omitted version, the policy can change without the client
-     * noticing, which would make a held decision a wrong one, so the
-     * constructor rejects the combination instead of quietly running uncached.
-     * The opt-in itself, defaulting to off, is the cross-SDK contract; the pin
-     * requirement is this client's own way of satisfying it, not a mandate on
-     * the other ports. See CACHE-SEMANTICS.md.
-     */
-    cacheAccessDecisions?: boolean;
-    /**
-     * Cap on cached entries (default 500), a positive integer. Past the cap LRU
-     * entries are evicted. Keep modest: an entry holds its request body as the
-     * key, so a long typeahead session with a high cap is a lot of retained
-     * text.
-     */
-    cacheMaxEntries?: number;
-    /**
-     * Set to `false` to never start the background `/v1/health` poll (default
-     * `true`). Server renderers and serverless handlers that build a client per
-     * request want this: the poll has nothing to keep warm there.
-     *
-     * The poll is not only a warm connection. It is also what closes the
-     * circuit breaker after a transport failure, by reaching `/v1/health` again
-     * while every other request is refused with `UNREACHABLE`. It is not the
-     * only thing that can: with the poll on or off, one ordinary request is let
-     * through five seconds after a failure to find out whether the server is
-     * back.
-     */
-    heartbeat?: boolean;
     /**
      * Override the fetch implementation, for tests or for a host that needs its
      * own transport. Defaults to `globalThis.fetch`.
@@ -436,16 +371,13 @@ export interface EzClassifyClientOptions {
 
 const CLIENT_OPTION_KEYS: Record<keyof EzClassifyClientOptions, true> = {
     auth: true,
+    applicationId: true,
     contextToken: true,
     headers: true,
     contextId: true,
     contextVersion: true,
     timeout: true,
     disableCache: true,
-    cacheTtlMs: true,
-    cacheAccessDecisions: true,
-    cacheMaxEntries: true,
-    heartbeat: true,
     fetchImpl: true,
 };
 
@@ -487,6 +419,11 @@ export interface PingResult {
  * moves the moment a newer version is published.
  */
 const MUTABLE_VERSION_ALIAS = 'latest';
+
+/** Header carrying the registered application id, sent on Context requests. */
+const APPLICATION_ID_HEADER = 'x-ezclassify-application-id';
+/** The application id grammar: 1 to 128 characters, each `0x21` to `0x7e`. */
+const APPLICATION_ID_PATTERN = /^[\u0021-\u007e]{1,128}$/u;
 
 /**
  * Response header naming the concrete Context version that answered.
@@ -582,6 +519,17 @@ function _majorMinor(version: string): string {
 }
 
 /**
+ * The scheme a Context-bound client caches: the public view its synchronous
+ * accessors answer from, read at one concrete Context version.
+ *
+ * @internal
+ */
+export interface ContextSchemeProfile {
+    /** The scheme as it displays. */
+    view: SchemePublicView;
+}
+
+/**
  * A REST API client that delegates marking-scheme operations, guide operations,
  * and access-control operations to dedicated sub-objects.
  *
@@ -603,16 +551,12 @@ function _majorMinor(version: string): string {
  * await client.access.check(assertions, { clearance: 'HIGH' });
  * ```
  */
-export class EzClassifyClient
-    extends SchemeState
-    implements RemoteContextAdapter
-{
+export class EzClassifyClient implements RemoteContextAdapter {
     private readonly _baseUrl: string;
     private readonly _authToken?: string | AccessTokenSupplier;
-    private readonly _onAuthFailure?: ClientAuth['onAuthFailure'];
     private readonly _contextToken?: string | ContextTokenSupplier;
     private readonly _headers: Record<string, string>;
-    private readonly _applicationCredentialHeader?: string;
+    private readonly _applicationId?: string;
     /**
      * Caller spelled out an Authorization header, so the client keeps its hands
      * off it.
@@ -623,7 +567,6 @@ export class EzClassifyClient
      * 404 suspicious.
      */
     private readonly _authConfigured: boolean;
-    private readonly _heartbeatEnabled: boolean;
     /**
      * Read when building Context-bound operation paths
      *
@@ -654,20 +597,12 @@ export class EzClassifyClient
         null;
     private readonly _timeout: number;
     private readonly _fetch: typeof fetch;
-    private _connected = false;
-    private _everConnected = false;
-    /** When the transport failure that opened the circuit breaker happened. */
-    private _unreachableSince = 0;
     /**
-     * A probe is on the wire testing whether the server came back.
-     *
-     * The cooldown alone is a time comparison, so every request that arrives
-     * after it elapses would pass it. This holds the gate to a single trip: the
-     * rest are refused until that one settles.
+     * Some request has completed. A suspected auth failure is only believed
+     * from a client that has: its first failure is far more likely a wrong base
+     * URL than a stale credential.
      */
-    private _probeInFlight = false;
-    private _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
-    private _heartbeatDelay = 15_000;
+    private _hasConnected = false;
     private _destroyed = false;
     private _versionWarnEmitted = false;
     /**
@@ -701,37 +636,56 @@ export class EzClassifyClient
     private _answeredVersion: string | null = null;
     /** A re-warm already in flight, so a burst of responses starts one. */
     private _profileRewarm: Promise<void> | null = null;
-    /** The consumer opted access decisions into the cache. */
-    private readonly _cacheAccessDecisions: boolean;
-    private static readonly _HEARTBEAT_OK = 15_000;
-    private static readonly _HEARTBEAT_MAX = 60_000;
-    /** How long the breaker holds before letting a request test the wire. */
-    private static readonly _BREAKER_RETRY_MS = 5_000;
+    /**
+     * The primary scheme's cached profile and its synchronous reads. Installing
+     * a profile clears the response cache: a memoized answer was computed
+     * against the composition that just went away.
+     *
+     * @internal
+     */
+    readonly _primaryState = new SchemeProfileState(() => this._cache?.clear());
 
     /**
      * Marking-scheme operations: process, aggregate, suggest, scan, validate,
      * diff, …
      */
     readonly scheme: SchemeOps;
-    /** Guide operations: scan, evaluate, evaluateAll, … */
+    /** Guide operations: scan, evaluate, evaluateMany, … */
     readonly guide: GuideOps;
     /** Access-control operations: check, describeAccessRule, … */
     readonly access: AccessOps;
     /** Composed operations on the remotely resolved Context. */
     readonly context: ContextOps;
+    /**
+     * The other schemes the bound Context holds, reached by key:
+     * `client.schemes.get('district-records')`. {@link scheme} stays the
+     * primary.
+     */
+    readonly schemes: ContextSchemes;
+    /**
+     * The view of each key other than the primary's. One per key for the life
+     * of the client, so every caller naming a scheme shares its profile and its
+     * cache entries.
+     */
+    private readonly _schemeViews = new Map<string, SchemeOps>();
 
-    /** Whether the client has an active connection to the REST API. */
+    /**
+     * Whether a request has completed against the REST API and the client is
+     * still in use. Required by the adapter contract; the client holds no
+     * connection open and does not poll the server.
+     */
     get connected(): boolean {
-        return this._connected;
+        return this._hasConnected && !this._destroyed;
     }
 
     /**
      * Presence of optional families in the resolved Context composition.
      *
-     * A context-bound client caches this decomposition during `connect()`, so
-     * callers can answer presence synchronously without probing guide or access
-     * routes. This deliberately distinguishes a present access policy with no
-     * rules from a Context that declares no access policy.
+     * A context-bound client caches this decomposition during
+     * `connectContext()`, so callers can answer presence synchronously without
+     * probing guide or access routes. This deliberately distinguishes a present
+     * access policy with no rules from a Context that declares no access
+     * policy.
      */
     get compositionPresence():
         { readonly guides: boolean; readonly access: boolean } | undefined {
@@ -743,40 +697,7 @@ export class EzClassifyClient
         };
     }
 
-    /**
-     * Read by SchemeOps lifecycle methods
-     *
-     * @internal
-     */
-    get _activeProfile(): SchemePublicView | null {
-        return this._profile as SchemePublicView | null;
-    }
-
-    /**
-     * Swap the cached profile, and drop everything derived from the one being
-     * replaced.
-     *
-     * The request cache is cleared here because a memoized answer was computed
-     * against the composition that just went away. An unpinned binding keys
-     * every entry under `ctx:{id}`, the same key before and after the alias
-     * moves, so without this the old answers keep being served for the rest of
-     * their TTL while the synchronous surface already reports the new
-     * composition. This is the single chokepoint a composition change passes
-     * through, which is what makes it the place to do it.
-     *
-     * Set by SchemeOps lifecycle methods; also clears the concept-map and
-     * request caches
-     *
-     * @internal
-     */
-    _setActiveProfile(profile: SchemePublicView | null): void {
-        this._profile = profile === null ? null : deepFreeze(profile);
-        this.invalidateConceptMap();
-        this._cache?.clear();
-    }
-
     constructor(baseUrl: string, options?: EzClassifyClientOptions) {
-        super();
         // Refuse unknown configuration before it can silently drop caller auth.
         for (
             let bag: object | null = options ?? null;
@@ -817,28 +738,6 @@ export class EzClassifyClient
                 );
             }
         }
-        if (options?.cacheAccessDecisions) {
-            // Both refusals are loud on purpose. This option trades away part
-            // of the audit trail, so a caller who asked for it has to learn
-            // that it did not happen; running uncached anyway would leave them
-            // believing they made a trade they did not make, and caching under
-            // a binding that can move would answer with a decision the current
-            // policy never made.
-            if (!isVersionPinned(options)) {
-                throw new EzClassifyError(
-                    'EzClassifyClient: `cacheAccessDecisions` requires a { contextId, contextVersion } pin. ' +
-                        'A `latest` or omitted version can change the access policy under the ' +
-                        'client, and a cached decision would then be the old policy answering.',
-                    ErrorCodes.INVALID_INPUT,
-                );
-            }
-            if (options.disableCache) {
-                throw new EzClassifyError(
-                    'EzClassifyClient: `cacheAccessDecisions` needs the request cache, but `disableCache` turned it off.',
-                    ErrorCodes.INVALID_INPUT,
-                );
-            }
-        }
         if (
             options?.timeout !== undefined &&
             (!Number.isFinite(options.timeout) || options.timeout <= 0)
@@ -850,41 +749,8 @@ export class EzClassifyClient
                 ErrorCodes.INVALID_INPUT,
             );
         }
-        if (
-            options?.cacheTtlMs !== undefined &&
-            !(
-                Number.isFinite(options.cacheTtlMs) &&
-                options.cacheTtlMs > 0 &&
-                options.cacheTtlMs <= MAX_UNPINNED_TTL_MS
-            )
-        ) {
-            // The TTL is what bounds an entry on a binding that can move, so a
-            // value that never expires, or expires after the hour the cache
-            // contract allows, would keep answering from a composition the
-            // server may have replaced. Clamping it would hand the caller a
-            // lifetime they did not ask for without saying so.
-            throw new EzClassifyError(
-                `EzClassifyClient: \`cacheTtlMs\` must be a positive number of milliseconds, at most ${MAX_UNPINNED_TTL_MS} (one hour).`,
-                ErrorCodes.INVALID_INPUT,
-            );
-        }
-        if (
-            options?.cacheMaxEntries !== undefined &&
-            !(
-                Number.isSafeInteger(options.cacheMaxEntries) &&
-                options.cacheMaxEntries > 0
-            )
-        ) {
-            // A cap that is not a positive integer either holds nothing or
-            // never evicts, and the second grows without bound.
-            throw new EzClassifyError(
-                'EzClassifyClient: `cacheMaxEntries` must be a positive integer.',
-                ErrorCodes.INVALID_INPUT,
-            );
-        }
         this._baseUrl = baseUrl.replace(/\/+$/, '');
         this._authToken = options?.auth?.token;
-        this._onAuthFailure = options?.auth?.onAuthFailure;
         this._contextToken = options?.contextToken;
         // Copied, not held by reference: `_callerOwnsAuthorization` is decided
         // here once, so a header map that changed afterward would send an
@@ -893,37 +759,31 @@ export class EzClassifyClient
         this._callerOwnsAuthorization = Object.keys(this._headers).some(
             (name) => name.toLowerCase() === 'authorization',
         );
-        const applicationHeaders = Object.keys(this._headers).filter(
-            (name) => name.toLowerCase() === 'x-ezclassify-application-grant',
-        );
-        this._applicationCredentialHeader = applicationHeaders[0];
-        if (this._applicationCredentialHeader !== undefined) {
-            const mixed =
-                this._callerOwnsAuthorization ||
+        const applicationId = options?.applicationId;
+        if (applicationId !== undefined) {
+            if (
+                typeof applicationId !== 'string' ||
+                !APPLICATION_ID_PATTERN.test(applicationId)
+            ) {
+                throw new EzClassifyError(
+                    'EzClassifyClient: `applicationId` must be 1 to 128 characters, each a visible ASCII character (0x21 to 0x7e).',
+                    ErrorCodes.INVALID_INPUT,
+                );
+            }
+            if (
                 Object.keys(this._headers).some(
-                    (name) =>
-                        name.toLowerCase() === 'x-ezclassify-context-token',
-                ) ||
-                options?.contextToken !== undefined;
-            if (applicationHeaders.length !== 1 || mixed) {
+                    (name) => name.toLowerCase() === APPLICATION_ID_HEADER,
+                )
+            ) {
                 throw new EzClassifyError(
-                    'An application credential must use one header and cannot be combined with caller-written Authorization or Context token credentials.',
+                    'EzClassifyClient: set the application id with `applicationId`, not in `headers`.',
                     ErrorCodes.INVALID_INPUT,
                 );
             }
-            const credential = this._headers[this._applicationCredentialHeader];
-            if (typeof credential !== 'string' || !credential.trim()) {
-                throw new EzClassifyError(
-                    'An application credential must be a nonempty string.',
-                    ErrorCodes.INVALID_INPUT,
-                );
-            }
+            this._applicationId = applicationId;
         }
         this._authConfigured =
-            this._applicationCredentialHeader !== undefined ||
-            this._callerOwnsAuthorization ||
-            !!options?.auth?.token;
-        this._heartbeatEnabled = options?.heartbeat !== false;
+            this._callerOwnsAuthorization || !!options?.auth?.token;
         this._contextId = options?.contextId;
         // An empty string cannot name a version, so it means the same as
         // leaving the option out: the server chooses.
@@ -936,15 +796,10 @@ export class EzClassifyClient
         this._fetch = fetchImpl
             ? (url, init) => fetchImpl(url, init)
             : (url, init) => globalThis.fetch(url, init);
-        this._cache = options?.disableCache
-            ? null
-            : new RequestCache({
-                  defaultTtlMs: options?.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS,
-                  maxEntries: options?.cacheMaxEntries ?? 500,
-              });
+        this._cache = options?.disableCache ? null : new RequestCache();
         this._versionPinned = isVersionPinned(options);
-        this._cacheAccessDecisions = options?.cacheAccessDecisions === true;
         this.scheme = new SchemeOps(this);
+        this.schemes = new ContextSchemes((key) => this._schemeView(key));
         this.guide = new GuideOps(this);
         this.access = new AccessOps(this);
         this.context = new ContextOps(this);
@@ -964,21 +819,17 @@ export class EzClassifyClient
     }
 
     /**
-     * Stop the heartbeat and release resources. The client should not be used
-     * after calling destroy().
+     * Release resources. The client should not be used after calling destroy().
      *
-     * Memoized entries are dropped along with the heartbeat: an entry holds its
-     * request body as the key and the answer as the value, so a discarded
-     * client that stays reachable would otherwise keep both alive. Requests
-     * already on the wire are abandoned rather than canceled; a caller that
-     * needs them stopped passes its own signal.
+     * Memoized entries are dropped: an entry holds its request body as the key
+     * and the answer as the value, so a discarded client that stays reachable
+     * would otherwise keep both alive. The client runs no timers, so calling
+     * this is housekeeping rather than a duty. Requests already on the wire are
+     * abandoned rather than canceled; a caller that needs them stopped passes
+     * its own signal.
      */
     destroy(): void {
         this._destroyed = true;
-        if (this._heartbeatTimer) {
-            clearTimeout(this._heartbeatTimer);
-            this._heartbeatTimer = null;
-        }
         this._cache?.clear();
     }
 
@@ -1032,11 +883,11 @@ export class EzClassifyClient
      * The composition a Context resolves to is fixed for the life of a version,
      * so this is fetched once and reused; callers that race the first call
      * share that one request rather than each opening their own, which also
-     * keeps a concurrent `fetchProfile()` from duplicating the seven-request
-     * assembly behind it. It is what tells the client which guides the Context
-     * declares, whether it declares an access policy, and which scheme its
-     * access rules evaluate: the questions the base adapter contract asks
-     * synchronously and no per-family route answers.
+     * keeps a concurrent `scheme.fetchProfile()` from duplicating the
+     * six-request assembly behind it. It is what tells the client which guides
+     * the Context declares, whether it declares an access policy, and which
+     * scheme its access rules evaluate: the questions the base adapter contract
+     * asks synchronously and no per-family route answers.
      *
      * @returns The resolved composition
      * @throws {EzClassifyError} When the client is not bound to a Context
@@ -1096,6 +947,41 @@ export class EzClassifyClient
     }
 
     /**
+     * Every crosswalk the bound Context holds, in declaration order, each with
+     * its source and target scheme selectors and the mappings and selections a
+     * translation applies. Delegates to `client.context.describeCrosswalks()`.
+     *
+     * A dedicated read rather than part of the Context description: reviewed
+     * mappings run to tens of kilobytes, and most clients never translate.
+     *
+     * @returns One descriptor per crosswalk; empty when the Context declares
+     *   none
+     * @throws {EzClassifyError} When the client is not bound to a Context
+     */
+    async describeCrosswalks(): Promise<ContextCrosswalkDescriptor[]> {
+        return this.context.describeCrosswalks();
+    }
+
+    /**
+     * The view bound to a key, for {@link ContextSchemes.get}.
+     *
+     * The server decides whether the Context holds it. Every key gets its own
+     * view, the same object every time, and the primary's key is no exception:
+     * `this.scheme` answers in whatever is primary now, while a view answers in
+     * its key even after a moving alias makes another scheme primary. A view
+     * sends `?scheme=<key>` on every operation and profile read, keeps its own
+     * profile for the synchronous reads, and keys its cache entries by the key,
+     * so no answer crosses between schemes.
+     */
+    private _schemeView(key: string): SchemeOps {
+        const existing = this._schemeViews.get(key);
+        if (existing) return existing;
+        const view = new SchemeOps(this, key);
+        this._schemeViews.set(key, view);
+        return view;
+    }
+
+    /**
      * List every Context visible to the caller.
      *
      * @returns Context ids in server order; non-string response entries are
@@ -1137,278 +1023,47 @@ export class EzClassifyClient
     }
 
     /**
-     * Connect to a remote API, verify health, and warm the selected Context
-     * profile.
+     * Verify health and warm the Context binding: the description, the profile
+     * of every scheme the Context holds, and the guide metadata. Called by
+     * {@link connectContext}.
      *
-     * @param baseUrl - Deployment base URL.
-     * @param options - Context binding, credentials, transport, and cache
-     *   options.
-     * @returns A ready client; call {@link destroy} when it is no longer needed.
      * @throws {EzClassifyError} If connectivity, Context resolution, or profile
      *   loading fails.
+     * @internal
      */
-    static async connect(
-        baseUrl: string,
-        options?: EzClassifyClientOptions,
-    ): Promise<EzClassifyClient> {
-        const client = new EzClassifyClient(baseUrl, options);
-
-        await client._request<{ status: string }>(
+    async _open(): Promise<void> {
+        await this._request<{ status: string }>(
             'GET',
             '/v1/health',
             undefined,
             AbortSignal.timeout(5_000),
         );
 
-        if (options?.contextId) {
-            // A context-bound client that skipped this would have to answer
-            // "what guides does my Context have" and "which scheme do its
-            // access rules evaluate" with a shrug, and both are settled facts
-            // by the time the Context resolves.
-            const description = await client.describeContext();
-            // The description first, and not only for ordering's sake: it
-            // carries the concrete version the binding resolved to, and the
-            // seven legs below are issued against that rather than against the
-            // caller's `latest`. Seven requests against one concrete version
-            // cannot straddle two compositions the way seven against a moving
-            // alias can.
-            //
-            // This rejects rather than warning, unlike the guide warm below. A
-            // caller who only marks text should not lose its connection over a
-            // guide view; a client that connects without a profile is a client
-            // whose entire synchronous surface throws, which is the failure
-            // this warm exists to remove. Warning here would reproduce that
-            // failure with a console line in front of it.
-            const profile = await client._fetchProfileFromContext(description);
-            client._setActiveProfile(profile);
-            client._profileContextVersion = description.version;
-            await client.guide._warmGuideMeta();
-        }
-
-        client._connected = true;
-        client._everConnected = true;
-        client._scheduleHeartbeat();
-        return client;
-    }
-
-    /** @internal */
-    protected _loadProfile(): SchemePublicView {
-        const profile = this._activeProfile;
-        if (!profile) {
-            throw new EzClassifyError(
-                'No profile cached. Use EzClassifyClient.connect() or call fetchProfile() first.',
-                ErrorCodes.INVALID_INPUT,
-            );
-        }
-        return profile;
-    }
-
-    /** Return the profile selected by this client's resolved Context. */
-    override getScheme(): SchemePublicView {
-        return this._loadProfile();
-    }
-
-    /** Return metadata for the profile selected by the resolved Context. */
-    override getSchemeMeta(): SchemeMetaView {
-        return super.getSchemeMeta();
-    }
-
-    /** Return categories for the profile selected by the resolved Context. */
-    override listCategories(): CategoryView[] {
-        return super.listCategories();
-    }
-
-    /** Return Context-selected concepts in one category. */
-    override getConceptsInCategory(categoryId: string): ConceptView[];
-    override getConceptsInCategory(
-        categoryId: string,
-        options: { nested: true },
-    ): Array<{ concept: ConceptView; depth: number }>;
-    override getConceptsInCategory(
-        categoryId: string,
-        options?: { nested: true },
-    ): ConceptView[] | Array<{ concept: ConceptView; depth: number }> {
-        return options
-            ? super.getConceptsInCategory(categoryId, options)
-            : super.getConceptsInCategory(categoryId);
-    }
-
-    /**
-     * Fetch and cache the public profile from the server. Delegates to
-     * `client.scheme.fetchProfile()`.
-     */
-    async fetchProfile(): Promise<SchemePublicView> {
-        return this.scheme.fetchProfile();
-    }
-
-    /**
-     * Process a marking for someone who is writing it: the author's call.
-     * `input` is a marking string or an already-parsed assertion array, the
-     * same operand the local engine accepts. Delegates to
-     * `client.scheme.process()`.
-     */
-    async process(
-        input: string | Assertion[],
-        options?: {
-            inputFormat?: string;
-            outputFormat?: string;
-            /** The facts already chosen, settled together with `input`. */
-            assertions?: Assertion[];
-            context?: ProcessingContext;
-            surface?: string;
-            /**
-             * Part markings the whole must cover. The whole is judged as
-             * covering them: a part it does not cover is an error, and so is a
-             * part that does not read as a marking. Every proposed fix and
-             * every rank floor is worked out against the whole and these parts
-             * together, so a raise never lands below what a part needs. Each
-             * entry is a marking in one of the scheme's part formats, or any
-             * format the scheme reads. Empty or absent, the whole stands
-             * alone.
-             */
-            parts?: string[];
-            /**
-             * The outputs to write into `renders`, each spelled exactly as a
-             * key of `renders` is: `surface/view` for a scheme that declares
-             * surfaces, a format id otherwise. Omitted or empty, `renders` is
-             * empty. An output the scheme does not declare is refused.
-             */
-            outputs?: string[];
-            /**
-             * Category ids to answer picker options for, in `suggestionsFor`.
-             * Omitted, nothing is suggested and the field is absent. A category
-             * the scheme does not declare is refused.
-             */
-            suggestFor?: string[];
-            signal?: AbortSignal;
-        },
-    ): Promise<ProcessResult> {
-        return this.scheme.process(input, options);
-    }
-
-    /**
-     * Aggregate multiple marking strings into a single combined marking.
-     * Delegates to `client.scheme.aggregate()`.
-     */
-    async aggregate(
-        inputs: string[],
-        options?: {
-            inputFormat?: string;
-            outputFormat?: string;
-            context?: ProcessingContext;
-            surface?: string;
-            signal?: AbortSignal;
-        },
-    ): Promise<AggregateResult> {
-        return this.scheme.aggregate(inputs, options);
-    }
-
-    /**
-     * Aggregate already-parsed assertion sets losslessly. Delegates to
-     * `client.scheme.aggregateAssertions()`.
-     */
-    async aggregateAssertions(
-        assertionSets: Assertion[][],
-        options?: {
-            outputFormat?: string;
-            context?: ProcessingContext;
-            surface?: string;
-            signal?: AbortSignal;
-        },
-    ): Promise<AggregateResult> {
-        return this.scheme.aggregateAssertions(assertionSets, options);
-    }
-
-    /**
-     * Expand a named label preset by id on the server. Delegates to
-     * `client.scheme.applyPreset()`.
-     */
-    async applyPreset(
-        presetId: string,
-        options?: { outputFormat?: string },
-    ): Promise<ValidateResult> {
-        return this.scheme.applyPreset(presetId, options);
-    }
-
-    /**
-     * Generate suggestions for completing or modifying a marking. Delegates to
-     * `client.scheme.suggest()`. `input` is the marking as text or as facts,
-     * one or the other, the same operand the local engine accepts.
-     */
-    async suggest(
-        input: string | Assertion[],
-        options?: {
-            inputFormat?: string;
-            outputFormat?: string;
-            filter?: string;
-            surface?: string;
-            includeGated?: boolean;
-            signal?: AbortSignal;
-        },
-    ): Promise<SuggestResult> {
-        return this.scheme.suggest(input, options);
-    }
-
-    /**
-     * Suggest for several categories at once against one committed assertion
-     * set. Delegates to `client.scheme.suggestForCategories()`.
-     */
-    async suggestForCategories(
-        assertions: Assertion[],
-        categoryIds: string[],
-        options?: {
-            outputFormat?: string;
-            surface?: string;
-            signal?: AbortSignal;
-        },
-    ): Promise<SuggestResultsByCategory> {
-        return this.scheme.suggestForCategories(
-            assertions,
-            categoryIds,
-            options,
-        );
-    }
-
-    /**
-     * Scan a document for markings, with the limit report beside them.
-     * Delegates to `client.scheme.scan()`.
-     */
-    async scan(
-        text: string,
-        options?: ScanOptions & { signal?: AbortSignal },
-    ): Promise<ScanOutcome> {
-        return this.scheme.scan(text, options);
-    }
-
-    /**
-     * Render assertions directly into a marking string without re-parsing.
-     * Delegates to `client.scheme.render()`.
-     */
-    async render(
-        assertions: Assertion[],
-        format?: string,
-        options?: RenderOptions,
-    ): Promise<RenderResult> {
-        return this.scheme.render(assertions, format, options);
-    }
-
-    /**
-     * Collect concept-attached notices for the given assertions. Delegates to
-     * `client.scheme.collectNotices()`.
-     *
-     * For assertions alone. A process, validate, aggregate or scan result
-     * already carries the same list on its `notices` field.
-     */
-    async collectNotices(assertions: Assertion[]): Promise<
-        Array<{
-            conceptId: string;
-            conceptName: string;
-            type: string;
-            text: string;
-            required: boolean;
-        }>
-    > {
-        return this.scheme.collectNotices(assertions);
+        // A context-bound client that skipped this would have to answer
+        // "what guides does my Context have" and "which scheme do its
+        // access rules evaluate" with a shrug, and both are settled facts
+        // by the time the Context resolves.
+        const description = await this.describeContext();
+        // The description first, and not only for ordering's sake: it
+        // carries the concrete version the binding resolved to, and the
+        // six legs below are issued against that rather than against the
+        // caller's `latest`. Six requests against one concrete version
+        // cannot straddle two compositions the way six against a moving
+        // alias can.
+        //
+        // This rejects rather than warning, unlike the guide warm below. A
+        // caller who only marks text should not lose its connection over a
+        // guide view; a client that connects without a profile is a client
+        // whose entire synchronous surface throws, which is the failure
+        // this warm exists to remove. Warning here would reproduce that
+        // failure with a console line in front of it.
+        //
+        // Every other scheme the Context holds is warmed with it, for the
+        // same reason: a view `schemes.get()` hands out answers its
+        // synchronous reads at once, as the primary does.
+        this._installHeldProfiles(await this._fetchHeldProfiles(description));
+        this._profileContextVersion = description.version;
+        await this.guide._warmGuideMeta();
     }
 
     /** Audit a document through the bound remote Context. */
@@ -1416,13 +1071,6 @@ export class EzClassifyClient
         input: DocumentAssessmentInput,
     ): Promise<ContextOperationResult<DocumentAuditReport>> {
         return this.context.audit(input);
-    }
-
-    /** Assess document access through the bound remote Context. */
-    async assessDocumentAccess(
-        input: DocumentAccessAssessmentInput,
-    ): Promise<ContextOperationResult<DocumentAccessAssessment>> {
-        return this.context.assessDocumentAccess(input);
     }
 
     /** Evaluate a trusted target and retain the resolved Context envelope. */
@@ -1452,137 +1100,6 @@ export class EzClassifyClient
     }
 
     /**
-     * Cover check. Aggregates the children on the server and reports
-     * covered/missing. Delegates to `client.scheme.checkCoverage()`.
-     */
-    async checkCoverage(
-        children: string[],
-        parent: string,
-        options?: {
-            inputFormat?: string;
-            outputFormat?: string;
-            signal?: AbortSignal;
-        },
-    ): Promise<CoverageReport> {
-        return this.scheme.checkCoverage(children, parent, options);
-    }
-
-    /**
-     * Describe a concept's usage: definition, guidance, and applicable rules.
-     * Delegates to `client.scheme.describeConcept()`.
-     */
-    async describeConcept(
-        conceptId: string,
-        categoryId: string,
-        options?: { view?: string },
-    ): Promise<ConceptDescription> {
-        return this.scheme.describeConcept(conceptId, categoryId, options);
-    }
-
-    /**
-     * Judge a marking for someone who is reading it: the reader's call. `input`
-     * is marking text, or facts as stated, never the settled `assertions` of an
-     * earlier result. Delegates to `client.scheme.validate()`.
-     */
-    async validate(
-        input: string | Assertion[],
-        options?: {
-            /**
-             * The format `input` is written in, when it is text. The server
-             * refuses it with facts, which carry no text.
-             */
-            inputFormat?: string;
-            outputFormat?: string;
-            context?: ProcessingContext;
-            surface?: string;
-            /**
-             * Part markings the whole must cover. The whole is judged as
-             * covering them: a part it does not cover is an error, and so is a
-             * part that does not read as a marking. Each entry is a marking in
-             * one of the scheme's part formats, or any format the scheme reads.
-             * Empty or absent, the whole stands alone.
-             */
-            parts?: string[];
-            signal?: AbortSignal;
-        },
-    ): Promise<ValidateResult> {
-        return this.scheme.validate(input, options);
-    }
-
-    /**
-     * Explain, step by step, how the server settles a marking: the trace of the
-     * processing a `process` call with the same input runs. Delegates to
-     * `client.scheme.explain()`.
-     */
-    async explain(
-        input: string | Assertion[],
-        options?: {
-            inputFormat?: string;
-            outputFormat?: string;
-            /** The facts already chosen, settled together with `input`. */
-            assertions?: Assertion[];
-            context?: ProcessingContext;
-            surface?: string;
-            /** Part markings the whole must cover, judged as on {@link process}. */
-            parts?: string[];
-            signal?: AbortSignal;
-        },
-    ): Promise<ExplanationTrace> {
-        return this.scheme.explain(input, options);
-    }
-
-    /**
-     * Normalize a marking string to its canonical rendered form. Delegates to
-     * `client.scheme.normalize()`.
-     */
-    async normalize(
-        input: string,
-        options?: {
-            inputFormat?: string;
-            outputFormat?: string;
-            signal?: AbortSignal;
-        },
-    ): Promise<string> {
-        return this.scheme.normalize(input, options);
-    }
-
-    /**
-     * Diff two marking strings, returning added, removed, and common
-     * assertions. Delegates to `client.scheme.diff()`.
-     */
-    async diff(
-        a: string,
-        b: string,
-        options?: { inputFormat?: string; signal?: AbortSignal },
-    ): Promise<DiffResult> {
-        return this.scheme.diff(a, b, options);
-    }
-
-    /**
-     * Build a render-ready structural view of the client's profile. Delegates
-     * to `client.scheme.buildSchemeView()`.
-     */
-    async buildSchemeView(): Promise<SchemeStructuralView> {
-        return this.scheme.buildSchemeView();
-    }
-
-    /**
-     * Substring filter over concepts in the client's profile. Delegates to
-     * `client.scheme.filterConcepts()`.
-     */
-    async filterConcepts(query: string): Promise<FilterResult> {
-        return this.scheme.filterConcepts(query);
-    }
-
-    /**
-     * Compact id/label pairs for every category. Delegates to
-     * `client.scheme.listCategoriesFlat()`.
-     */
-    async listCategoriesFlat(): Promise<Array<{ id: string; label: string }>> {
-        return this.scheme.listCategoriesFlat();
-    }
-
-    /**
      * The composition component of a cache key: what the operation ran against.
      *
      * The Context binding is the most specific name the client has for the
@@ -1597,6 +1114,21 @@ export class EzClassifyClient
         return this._contextVersion
             ? `ctx:${this._contextId}@${this._contextVersion}`
             : `ctx:${this._contextId}`;
+    }
+
+    /**
+     * The cache name for one scheme view's entries: the binding's, narrowed by
+     * the held scheme's selector for any view but the primary's. The same
+     * request to two schemes is two questions, so it is two entries.
+     *
+     * Called by SchemeOps
+     *
+     * @internal
+     */
+    _schemeCacheKey(selector: string | undefined): string | undefined {
+        const stack = this._stackCacheKey();
+        if (selector === undefined) return stack;
+        return `${stack ?? ''}?scheme=${selector}`;
     }
 
     /**
@@ -1653,168 +1185,181 @@ export class EzClassifyClient
     }
 
     /**
-     * Run one access-decision op, through the cache only when the consumer
-     * asked for that.
-     *
-     * Decisions are as deterministic as any other op under a version pin, and
-     * they are still uncached by default, because the round trip is the audit
-     * record: the runtime records each decision against the versions that
-     * answered it, and a decision served from memory leaves no such trace.
-     * `cacheAccessDecisions` is the consumer saying it wants the traffic back
-     * and accepts the thinner audit trail. The option is refused at
-     * construction on any binding where the answer could also change, so what
-     * it trades is audit completeness and nothing else.
-     *
-     * Called by AccessOps and ContextOps
-     *
-     * @internal
-     */
-    _cachedDecision<T>(
-        op: string,
-        path: string,
-        body: unknown,
-        thunk: (
-            signal: AbortSignal | undefined,
-            wireBody: unknown,
-        ) => Promise<T>,
-    ): Promise<T> {
-        if (!this._cacheAccessDecisions) return thunk(undefined, body);
-        return this._cachedWire(op, path, body, thunk);
-    }
-
-    /**
-     * Schedule the next heartbeat ping. Uses exponential backoff on failure and
-     * resets to 15 s on success.
-     *
-     * The timer is unref'd where the platform offers it, so a pending poll
-     * never holds a Node process open on its own. `destroy()` is still the way
-     * to stop it; unref only keeps a forgotten client from outliving the work.
-     */
-    private _scheduleHeartbeat(): void {
-        if (this._destroyed || !this._heartbeatEnabled) return;
-        this._heartbeatTimer = setTimeout(async () => {
-            if (this._destroyed) return;
-            try {
-                await this._request<unknown>(
-                    'GET',
-                    '/v1/health',
-                    undefined,
-                    AbortSignal.timeout(5_000),
-                );
-                this._heartbeatDelay = EzClassifyClient._HEARTBEAT_OK;
-            } catch {
-                this._heartbeatDelay = Math.min(
-                    this._heartbeatDelay * 2,
-                    EzClassifyClient._HEARTBEAT_MAX,
-                );
-            }
-            this._scheduleHeartbeat();
-        }, this._heartbeatDelay);
-        (this._heartbeatTimer as { unref?: () => void }).unref?.();
-    }
-
-    /**
      * Fetch a public profile from the scheme the bound Context names, composing
      * the responses of the `/v1/ctx/{ctxId}/{version}/scheme/*` sub-resources.
      *
-     * The path is built from the description's concrete version rather than
-     * from the caller's binding, which may be `latest` or a version the signed
-     * carrier defaulted.
+     * The reads go to the Context the client is bound to, under the id it was
+     * bound with. The description says what the Context is, and that is not
+     * always where it is served: a held draft reports the Context its documents
+     * name, while the server holds it under its own id.
+     *
+     * When the description names the bound id, its concrete version is a
+     * version that id serves, so the path is built from it rather than from the
+     * caller's binding, which may be `latest` or a version the signed carrier
+     * defaulted. Six reads at one concrete version cannot straddle two
+     * compositions. When the bound id holds a Context named otherwise, the
+     * description's version is not one the bound id serves, so the reads go to
+     * the binding's own version, or `latest` when it names none.
      *
      * There is no `?layers=` here. The layers belong to the Context, and the
-     * server would refuse to honor the parameter anyway.
+     * server would refuse to honor the parameter anyway. `selector` names a
+     * held scheme other than the primary, and goes on every read as `?scheme=`;
+     * absent, the reads answer for the primary.
      *
-     * Called by connect() and the re-warm on an alias move
+     * Called by _open(), SchemeOps.fetchProfile() and the re-warm on an alias
+     * move
      *
      * @internal
      */
     async _fetchProfileFromContext(
         description: ContextDescription,
-    ): Promise<SchemePublicView> {
-        const id = encodeURIComponent(description.id);
-        const version = encodeURIComponent(description.version);
-        return this._fetchSchemeResources(`/v1/ctx/${id}/${version}/scheme`);
+        selector?: string,
+    ): Promise<ContextSchemeProfile> {
+        if (!this._contextId) {
+            throw new EzClassifyError(
+                'Reading a scheme profile requires a context-bound client (construct with a `contextId`).',
+                ErrorCodes.INVALID_INPUT,
+            );
+        }
+        const servedAt =
+            description.id === this._contextId
+                ? description.version
+                : (this._contextVersion ?? 'latest');
+        const id = encodeURIComponent(this._contextId);
+        const version = encodeURIComponent(servedAt);
+        return this._fetchSchemeResources(
+            `/v1/ctx/${id}/${version}/scheme`,
+            selector === undefined
+                ? ''
+                : `?${new URLSearchParams({ scheme: selector })}`,
+        );
     }
 
     /**
-     * Compose one `SchemePublicView` from the seven sub-resources under a path
-     * prefix: summary, concepts, categories, formats, grammar, scopes, label
-     * presets.
+     * Fetch the profile of every scheme a description says the Context holds:
+     * the primary first, then one per other held scheme, all at the
+     * description's concrete version. Nothing is installed, so a failure leaves
+     * every profile the client already holds in place.
+     */
+    private async _fetchHeldProfiles(
+        description: ContextDescription,
+    ): Promise<HeldProfiles> {
+        const others = description.schemes.filter(
+            (held) => !held.roles.includes('primary'),
+        );
+        const [primary, ...rest] = await Promise.all([
+            this._fetchProfileFromContext(description),
+            ...others.map((held) =>
+                this._fetchProfileFromContext(description, held.selector),
+            ),
+        ]);
+        return {
+            primary: primary!,
+            primaryKey: primaryKeyOf(description),
+            others: new Map(
+                others.map((held, index) => [held.selector, rest[index]!]),
+            ),
+        };
+    }
+
+    /**
+     * Install every profile {@link _fetchHeldProfiles} read, together, so the
+     * synchronous surface never answers one scheme from one composition and
+     * another from the next.
+     *
+     * A view whose key the description does not list loses its profile: its
+     * synchronous reads refuse and its operations reach a server that refuses
+     * the key, rather than either answering from what the Context used to be.
+     * The primary's key has a view like any other, reading the primary's
+     * profile.
+     */
+    private _installHeldProfiles(profiles: HeldProfiles): void {
+        this._primaryState._setActiveProfile(profiles.primary);
+        const held = new Map(profiles.others);
+        if (profiles.primaryKey !== undefined) {
+            held.set(profiles.primaryKey, profiles.primary);
+        }
+        for (const [key, profile] of held) {
+            this._schemeView(key)._install(profile);
+        }
+        for (const [key, view] of this._schemeViews) {
+            if (!held.has(key)) view._install(null);
+        }
+    }
+
+    /**
+     * Compose one cached profile from the six sub-resources under a path
+     * prefix: summary, concepts, categories, formats, scopes, label presets.
      *
      * One assembly for every Context-bound scheme-resource path. Keeping the
-     * seven resource requests together makes any server/client divergence show
-     * up here as a type error rather than as a partially rendered UI.
+     * six resource requests together makes any server/client divergence show up
+     * here as a type error rather than as a partially rendered UI.
      */
     private async _fetchSchemeResources(
         base: string,
-    ): Promise<SchemePublicView> {
-        const [
-            summary,
-            concepts,
-            categories,
-            formats,
-            _grammar,
-            scopes,
-            labelPresets,
-        ] = await Promise.all([
-            this._request<{
-                id: string;
-                version: string;
-                name: string;
-                description: string;
-                definition?: string;
-                guidance?: string;
-                colorFrom?: string;
-                colorRules?: MarkingColorRule[];
-                roleAware?: boolean;
-                vocabulary?: Vocabulary;
-                referenceSurfaceLabel: { singular: string; plural: string };
-                contextFormats?: { whole: string[]; part: string[] };
-                embeddedMarking?: Array<{
-                    pattern: string;
-                    template: string;
-                }>;
-                defaultScope?: string;
-                scopeLabel?: string;
-                defaultRenderFormat?: string;
-                defaultPartRenderFormat?: string;
-                defaultWholeRenderFormat?: string;
-            }>('GET', base),
-            this._request<SchemePublicView['concepts']>(
-                'GET',
-                `${base}/concepts`,
-            ),
-            this._request<SchemePublicView['categories']>(
-                'GET',
-                `${base}/categories`,
-            ),
-            this._request<SchemePublicView['formats']>(
-                'GET',
-                `${base}/formats`,
-            ),
-            this._request<unknown>('GET', `${base}/grammar`),
-            this._request<NonNullable<SchemePublicView['scopes']>>(
-                'GET',
-                `${base}/scopes`,
-            ),
-            this._request<SchemePublicView['labelPresets']>(
-                'GET',
-                `${base}/label-presets`,
-            ),
-        ]);
+        query: string,
+    ): Promise<ContextSchemeProfile> {
+        const [summary, concepts, categories, formats, scopes, labelPresets] =
+            await Promise.all([
+                this._request<{
+                    id: string;
+                    version: string;
+                    name: string;
+                    description?: string;
+                    definition?: string;
+                    guidance?: string;
+                    marking?: string;
+                    colorFrom?: string;
+                    colorRules?: MarkingColorRule[];
+                    roleAware?: boolean;
+                    vocabulary?: Vocabulary;
+                    referenceSurfaceLabel: { singular: string; plural: string };
+                    contextFormats?: { whole: string[]; part: string[] };
+                    embeddedMarking?: Array<{
+                        pattern: string;
+                        template: string;
+                    }>;
+                    defaultScope?: string;
+                    scopeLabel?: string;
+                    defaultRenderFormat?: string;
+                    defaultPartRenderFormat?: string;
+                    defaultWholeRenderFormat?: string;
+                }>('GET', `${base}${query}`),
+                this._request<SchemePublicView['concepts']>(
+                    'GET',
+                    `${base}/concepts${query}`,
+                ),
+                this._request<SchemePublicView['categories']>(
+                    'GET',
+                    `${base}/categories${query}`,
+                ),
+                this._request<SchemePublicView['formats']>(
+                    'GET',
+                    `${base}/formats${query}`,
+                ),
+                this._request<NonNullable<SchemePublicView['scopes']>>(
+                    'GET',
+                    `${base}/scopes${query}`,
+                ),
+                this._request<SchemePublicView['labelPresets']>(
+                    'GET',
+                    `${base}/label-presets${query}`,
+                ),
+            ]);
 
         // The collections arrive as the views the profile holds, so they are
         // carried as sent. The server names the default render format so the
         // client does not guess from declaration order; when the scheme names
         // none the field is absent, and the contract's rule is the first
         // declared format.
-        return {
+        const view: SchemePublicView = {
             id: summary.id,
             version: summary.version,
             name: summary.name,
             description: summary.description,
             definition: summary.definition,
             guidance: summary.guidance,
+            marking: summary.marking,
             colorFrom: summary.colorFrom,
             colorRules: summary.colorRules,
             concepts,
@@ -1836,6 +1381,7 @@ export class EzClassifyClient
             embeddedMarking: summary.embeddedMarking,
             labelPresets,
         };
+        return { view };
     }
 
     /**
@@ -1914,31 +1460,6 @@ export class EzClassifyClient
     }
 
     /**
-     * Give the host its chance to refresh the credential before the replay.
-     *
-     * A hook that throws is a host saying it cannot produce a working
-     * credential, so the replay is pointless and that failure is the one worth
-     * reporting.
-     */
-    private async _notifyAuthFailure(
-        err: EzClassifyError,
-        budget: RequestBudget,
-    ): Promise<void> {
-        const hook = this._onAuthFailure;
-        if (!hook) return;
-        await budget.run(
-            'auth.onAuthFailure',
-            () => hook(err),
-            (hookErr) =>
-                new EzClassifyError(
-                    `auth.onAuthFailure failed: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
-                    ErrorCodes.INVALID_INPUT,
-                    err.message,
-                ),
-        );
-    }
-
-    /**
      * Build request headers while keeping Context authorization off probes.
      *
      * `accessToken` arrives undefined when the caller supplied its own
@@ -1959,8 +1480,8 @@ export class EzClassifyClient
         }
         const isContext =
             resolvedPath === '/v1/ctx' || resolvedPath.startsWith('/v1/ctx/');
-        if (!isContext && this._applicationCredentialHeader !== undefined) {
-            delete headers[this._applicationCredentialHeader];
+        if (isContext && this._applicationId !== undefined) {
+            headers[APPLICATION_ID_HEADER] = this._applicationId;
         }
         if (contextToken && isContext) {
             headers['X-EzClassify-Context-Token'] = contextToken;
@@ -1971,9 +1492,8 @@ export class EzClassifyClient
     /**
      * Execute an HTTP request against the API and return the parsed JSON body.
      *
-     * A request that looks like it failed on authentication tells the host
-     * through {@link ClientAuth.onAuthFailure}, and is replayed exactly once
-     * when a token supplier can produce a fresh credential. See
+     * A request that looks like it failed on authentication is replayed exactly
+     * once when a token supplier can produce a fresh credential. See
      * {@link _isSuspectedAuthFailure} for what qualifies; there is no loop, a
      * second failure is the caller's.
      *
@@ -1987,19 +1507,10 @@ export class EzClassifyClient
         body?: unknown,
         signal?: AbortSignal,
     ): Promise<T> {
-        const breakerOpen =
-            this._everConnected && !this._connected && path !== '/v1/health';
-        if (breakerOpen && !this._admitProbe()) {
-            throw new EzClassifyError(
-                `Server unreachable, skipping ${method} ${path}`,
-                ErrorCodes.UNREACHABLE,
-            );
-        }
-
-        // Read before the attempt: a transport failure clears _connected, and
-        // the replay decision is about the state the request started from.
-        const wasWorking = this._connected || this._everConnected;
-        // One budget for the whole request, hook and replay included, so no
+        // Read before the attempt: the replay decision is about the state the
+        // request started from.
+        const wasWorking = this._hasConnected;
+        // One budget for the whole request, replay included, so no
         // caller-supplied code on the way can stretch it past `timeout`.
         const budget = new RequestBudget(path, this._timeout, signal);
         try {
@@ -2013,7 +1524,6 @@ export class EzClassifyClient
                 );
             } catch (err: unknown) {
                 if (!this._isSuspectedAuthFailure(err, wasWorking)) throw err;
-                await this._notifyAuthFailure(err as EzClassifyError, budget);
                 if (!this._canReplayWithFreshToken()) throw err;
                 // The credential the host is about to hand back may belong to
                 // a different caller than the one the held entries were
@@ -2024,53 +1534,9 @@ export class EzClassifyClient
                 this._cache?.clear();
                 return await this._attempt<T>(method, path, body, budget, true);
             }
-        } catch (err: unknown) {
-            // A probe that did not come back working re-arms the cooldown,
-            // whatever it failed with. Only the network branch stamps
-            // _unreachableSince on its own, so a server that accepts the
-            // connection and then answers nothing would otherwise leave the
-            // gate open and send every later request into the same hang.
-            if (breakerOpen) this._unreachableSince = Date.now();
-            throw err;
         } finally {
             budget.close();
-            if (breakerOpen) this._probeInFlight = false;
         }
-    }
-
-    /**
-     * Claim the single probe slot the open breaker allows, if it is free.
-     *
-     * Returns false while the cooldown is still running or while an earlier
-     * probe is still on the wire; the caller then refuses its request.
-     */
-    private _admitProbe(): boolean {
-        if (this._probeInFlight) return false;
-        if (!this._breakerProbeDue()) return false;
-        this._probeInFlight = true;
-        return true;
-    }
-
-    /**
-     * Whether a request may test the wire while the circuit breaker is open.
-     *
-     * After a short cooldown one request is let through, and only one: the slot
-     * is claimed by the request that takes it and released when that request
-     * settles, so a concurrent burst does not all land on a server that is
-     * still down. The probe either succeeds, which closes the breaker, or
-     * fails, which re-arms the cooldown from the new failure.
-     *
-     * The cooldown applies whether or not the health poll is running. The poll
-     * backs off to a full minute after repeated failures, so relying on it
-     * alone could leave every request refused long after the server had
-     * recovered. The poll still closes the breaker on its own; this puts a
-     * five-second ceiling on how long a caller waits for that to happen.
-     */
-    private _breakerProbeDue(): boolean {
-        return (
-            Date.now() - this._unreachableSince >=
-            EzClassifyClient._BREAKER_RETRY_MS
-        );
     }
 
     /**
@@ -2103,9 +1569,7 @@ export class EzClassifyClient
      *
      * Only a supplier can produce a different credential. A static token cannot
      * change, and a caller who wrote the `Authorization` header owns it, so in
-     * both cases the replay would put the identical bytes back on the wire. The
-     * host still gets the {@link ClientAuth.onAuthFailure} signal; what it does
-     * not get is a pointless second request.
+     * both cases the replay would put the identical bytes back on the wire.
      */
     private _canReplayWithFreshToken(): boolean {
         if (this._callerOwnsAuthorization) return false;
@@ -2132,11 +1596,10 @@ export class EzClassifyClient
      * The response that noticed the move is delivered either way.
      *
      * The rebuild runs in the background rather than blocking that response. It
-     * cannot be awaited here without turning every operation into a
-     * seven-request call, and the stale profile is what the caller already has;
-     * the point is that it stops being stale. `_profileContextVersion` is
-     * advanced before the fetch so a burst of responses at the new version
-     * starts one rebuild.
+     * cannot be awaited here without turning every operation into a six-request
+     * call, and the stale profile is what the caller already has; the point is
+     * that it stops being stale. `_profileContextVersion` is advanced before
+     * the fetch so a burst of responses at the new version starts one rebuild.
      */
     private _noteResolvedVersion(header: string | null): void {
         if (!header) return;
@@ -2147,7 +1610,8 @@ export class EzClassifyClient
         this._answeredVersion = header;
         if (held !== null && held !== header) this._cache?.clear();
 
-        if (!this._profile || !this._profileContextVersion) return;
+        if (!this._primaryState._activeProfile || !this._profileContextVersion)
+            return;
         if (header === this._profileContextVersion) return;
         if (this._profileRewarm) return;
 
@@ -2166,8 +1630,8 @@ export class EzClassifyClient
                 // the alias again.
                 this._contextDescription = null;
                 const description = await this.describeContext();
-                this._setActiveProfile(
-                    await this._fetchProfileFromContext(description),
+                this._installHeldProfiles(
+                    await this._fetchHeldProfiles(description),
                 );
                 this._profileContextVersion = description.version;
             } catch (err) {
@@ -2248,14 +1712,13 @@ export class EzClassifyClient
         }
 
         // A spent budget is reported as TIMEOUT or ABORTED before this mapping
-        // runs. A deadline the client set is not evidence the server is gone,
-        // so it never reaches the breaker below.
+        // runs.
         const response = await budget.run(
             undefined,
             () => this._fetch(url, init),
             (err) => {
                 // An abort the client did not cause, from a transport that
-                // raised its own. Still not evidence the server is gone.
+                // raised its own.
                 if (err instanceof DOMException && err.name === 'AbortError') {
                     return new EzClassifyError(
                         `Request aborted: ${path}`,
@@ -2264,8 +1727,6 @@ export class EzClassifyClient
                 }
                 const message =
                     err instanceof Error ? err.message : String(err);
-                this._connected = false;
-                this._unreachableSince = Date.now();
                 return new EzClassifyError(
                     `Network error calling ${method} ${path}: ${message}`,
                     ErrorCodes.NETWORK,
@@ -2328,7 +1789,7 @@ export class EzClassifyClient
             });
         }
 
-        this._connected = true;
+        this._hasConnected = true;
         // Optional on purpose. `fetchImpl` is a caller-supplied seam, and
         // a host that hands over a minimal response object should not have
         // every request throw on a header this client only reads to notice

@@ -11,10 +11,8 @@ function envelope(result: unknown, responseProjection?: unknown) {
             requestedVersion: 'latest',
             resolvedVersion: '1.2.3',
             artifacts: [],
-            sources: [],
         },
         result,
-        operationLimitations: [],
         ...(responseProjection !== undefined ? { responseProjection } : {}),
     };
 }
@@ -27,9 +25,6 @@ const projection = {
         nominations: 1,
         evidenceSpans: 1,
         guideUnits: 1,
-        accessRuleResults: 0,
-        contentRequirements: 0,
-        contextRequirements: 0,
     },
 };
 
@@ -82,41 +77,6 @@ describe('EzClassifyClient Context operations', () => {
             text: 'record',
             responseProfile: 'summary',
         });
-    });
-
-    it('sends every document access input without inventing omitted fields', async () => {
-        fetchMock.mockResolvedValue(
-            mockResponse(
-                200,
-                JSON.stringify(
-                    envelope(
-                        corpusResult('ctx-document-assess-access.ok'),
-                        projection,
-                    ),
-                ),
-            ),
-        );
-        const input = {
-            text: 'record',
-            userAttributes: { role: 'reviewer' },
-            context: { workspace: 'north' },
-            guideDeterminations: {
-                findings: [],
-                manualSelections: [],
-            },
-            responseProfile: 'full' as const,
-        };
-
-        await client({ contextToken: 'signed-envelope' }).assessDocumentAccess(
-            input,
-        );
-
-        expect(fetchMock.mock.calls[0]![0]).toBe(
-            'https://api.example.com/v1/ctx/records/document/assess-access',
-        );
-        expect(JSON.parse(fetchMock.mock.calls[0]![1].body as string)).toEqual(
-            input,
-        );
     });
 
     it('supports marking and assertion targets for access checks', async () => {
@@ -226,9 +186,7 @@ describe('EzClassifyClient Context operations', () => {
     });
 
     it('refuses a translation without the Context that declares the crosswalk', async () => {
-        const flat = new EzClassifyClient('https://api.example.com', {
-            heartbeat: false,
-        });
+        const flat = new EzClassifyClient('https://api.example.com', {});
 
         await expect(
             flat.translate({ crosswalkId: 'x', marking: 'LEVEL-HIGH' }),

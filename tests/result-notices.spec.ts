@@ -47,10 +47,8 @@ function envelope(result: unknown) {
             contextId: 'records',
             resolvedVersion: '1.2.3',
             artifacts: [],
-            sources: [],
         },
         result,
-        operationLimitations: [],
     };
 }
 
@@ -124,6 +122,7 @@ describe('notices on a marking result', () => {
                                 result: markingResult(NOTICES),
                             },
                         ],
+                        unread: [],
                         limits: { status: 'complete', regionsFound: 1 },
                     }),
                 ),
