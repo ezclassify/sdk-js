@@ -189,8 +189,8 @@ class AbortRace<T> {
 }
 
 /**
- * Settle with the work's outcome or the abort sentinel, whichever
- * comes first. Work is not started on a signal that has already aborted.
+ * Settle with the work's outcome or the abort sentinel, whichever comes first.
+ * Work is not started on a signal that has already aborted.
  */
 function settleOnAbort<T>(
     start: () => T | PromiseLike<T>,
