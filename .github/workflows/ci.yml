@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
     inputs:
       full:
@@ -24,6 +25,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -52,6 +54,18 @@ jobs:
           //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
           NPMRC
           echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/ci-npmrc" >> "$GITHUB_ENV"
+
+      - name: Resolve declared Contracts dependency
+        id: upstream
+        if: github.event_name == 'pull_request'
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        uses: ezclassify/.github/actions/check-pr-dependencies@7c63d5b73824a37ed06730f43d3c056d19786f7d
+        with:
+          producer: ezclassify/contracts
+          packages: '@ezclassify/types @ezclassify/tsconfig @ezclassify/openapi @ezclassify/conformance @ezclassify/conformance-server'
+          publication-app-id: '5819382'
+          token: ${{ github.token }}
 
       # The lockfile is not committed (.gitignore), so the install resolves one
       # from an empty tree and proves those exact bytes with npm ci.
@@ -92,6 +106,8 @@ jobs:
         #
         # Names are matched whole and spelled out one at a time in the script.
         # A pattern would admit an unrelated package on a shared prefix.
+        env:
+          CONTRACTS_MIRROR: ${{ steps.upstream.outputs.version }}
         run: node scripts/check-installed-public-deps.mjs
 
       - name: Format check

@@ -29,7 +29,7 @@ function isDirectory(path) {
 }
 
 /** Find disallowed first-party packages anywhere in an npm-installed tree. */
-export function auditInstalledPublicDeps(root) {
+export function auditInstalledPublicDeps(root, expectedVersion = '') {
     const firstNodeModules = join(root, 'node_modules');
     if (!isDirectory(firstNodeModules)) {
         throw new Error(
@@ -44,9 +44,9 @@ export function auditInstalledPublicDeps(root) {
     function inspectPackage(packagePath, name) {
         if (!isDirectory(packagePath)) return;
         const manifestPath = join(packagePath, 'package.json');
-        const declaredName = JSON.parse(
+        const { name: declaredName, version } = JSON.parse(
             readFileSync(manifestPath, 'utf8'),
-        ).name;
+        );
         if (typeof declaredName !== 'string' || declaredName.length === 0) {
             throw new Error(
                 `Invalid installed package name in ${manifestPath}`,
@@ -63,6 +63,15 @@ export function auditInstalledPublicDeps(root) {
                 name === declaredName
                     ? location
                     : `${location} (package name ${declaredName})`,
+            );
+        }
+        if (
+            expectedVersion &&
+            ALLOWED.has(declaredName) &&
+            version !== expectedVersion
+        ) {
+            throw new Error(
+                `Installed ${manifestPath} at ${version}; expected ${expectedVersion}`,
             );
         }
         const nested = join(packagePath, 'node_modules');
@@ -102,7 +111,10 @@ if (
     resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
     try {
-        const unexpected = auditInstalledPublicDeps(process.cwd());
+        const unexpected = auditInstalledPublicDeps(
+            process.cwd(),
+            process.env.CONTRACTS_MIRROR,
+        );
         if (unexpected.length > 0) {
             console.error('ERROR: unexpected @ezclassify packages installed:');
             for (const path of unexpected) console.error(`  ${path}`);
