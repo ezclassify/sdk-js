@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { EzClassifyClient } from '../src/ezclassify-client';
+import { corpusBody } from './contract-fixtures';
 
 it('reads renewed Context tokens per decision without reconstructing the client', async () => {
     let token = 'first-signed-token';
@@ -62,7 +63,7 @@ it('keeps Context-token suppliers off health probes', async () => {
         throw new Error('credential unavailable');
     });
     const fetch = vi.fn(
-        async () => new Response(JSON.stringify({ status: 'ok' })),
+        async () => new Response(JSON.stringify(corpusBody('health.ok'))),
     );
     const client = new EzClassifyClient('https://runtime.test', {
         contextId: 'example',

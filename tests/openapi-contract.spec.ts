@@ -18,7 +18,7 @@ import yaml from 'js-yaml';
 import Ajv from 'ajv';
 import type { Assertion } from '@ezclassify/types';
 import { EzClassifyClient } from '../src/ezclassify-client';
-import { corpusResult } from './contract-fixtures';
+import { corpusBody, corpusResult } from './contract-fixtures';
 
 // ---------------------------------------------------------------------------
 // Spec + AJV setup
@@ -280,12 +280,7 @@ describe('openapi-contract: request body shape', () => {
     });
 
     it('GET /v1/health: correct method and path', async () => {
-        const calls = captureFetch({
-            status: 'ok',
-            engineVersion: '0.1.0',
-            engineSha: '',
-            gitTag: '',
-        });
+        const calls = captureFetch(corpusBody('health.ok'));
         const client = makeClient();
         await client.ping();
         expect(calls[0].method).toBe('GET');

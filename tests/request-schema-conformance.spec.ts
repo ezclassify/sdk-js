@@ -24,6 +24,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { corpusBody } from './contract-fixtures';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -276,6 +277,8 @@ function captureRequests(): Captured[] {
                         ? (JSON.parse(init.body) as Json)
                         : undefined,
             });
+            if (parsed.pathname === '/v1/health')
+                return new Response(JSON.stringify(corpusBody('health.ok')));
             return {
                 ok: true,
                 status: 200,

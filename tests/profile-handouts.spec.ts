@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EzClassifyClient } from '../src/ezclassify-client';
 import { connectContext } from '../src/connect';
 import { mockResponse, stubFetch } from './fetch-mock';
-import { corpusBody } from './contract-fixtures';
+import { corpusBody, fullContextGuideView } from './contract-fixtures';
 
 const RESOURCES: Array<[suffix: string, caseId: string]> = [
     ['/scheme/concepts', 'ctx-scheme-concepts.full'],
@@ -30,16 +30,18 @@ describe('the profile accessors hand out nothing a caller can change', () => {
 
     beforeEach(async () => {
         const fetchMock = stubFetch();
-        fetchMock.mockImplementation((url: string) => {
+        fetchMock.mockImplementation((url: string, init?: RequestInit) => {
             const path = url.split('?')[0] ?? '';
             const resource = RESOURCES.find(([suffix]) =>
                 path.endsWith(suffix),
             );
-            const payload = resource
-                ? corpusBody(resource[1])
-                : path.endsWith('/v1/health')
-                  ? { status: 'ok' }
-                  : corpusBody('ctx-describe.ok');
+            const payload = path.endsWith('/v1/ctx/ez-full/1.0.0/guide/view')
+                ? fullContextGuideView(init)
+                : resource
+                  ? corpusBody(resource[1])
+                  : path.endsWith('/v1/health')
+                    ? corpusBody('health.ok')
+                    : corpusBody('ctx-describe.ok');
             return Promise.resolve(mockResponse(200, JSON.stringify(payload)));
         });
         client = await connectContext({
@@ -47,7 +49,9 @@ describe('the profile accessors hand out nothing a caller can change', () => {
             contextId: 'ez-full',
             contextVersion: '1.0.0',
         });
-        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        expect(client.guide.listGuideMeta().map((guide) => guide.id)).toEqual([
+            'ez-test',
+        ]);
     });
 
     afterEach(() => {
