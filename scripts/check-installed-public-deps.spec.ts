@@ -60,6 +60,28 @@ describe('installed public dependency gate', () => {
         expect(auditInstalledPublicDeps(root)).toEqual([]);
     });
 
+    it('checks the published Contracts version at root and nested locations', () => {
+        const root = fixture(
+            '@ezclassify/types',
+            'some-package/node_modules/@ezclassify/types',
+        );
+        const version = '1.0.0-mirror.42.1';
+        const writeVersion = (location: string, version: string) =>
+            writeFileSync(
+                join(root, 'node_modules', location, 'package.json'),
+                JSON.stringify({ name: '@ezclassify/types', version }),
+            );
+        const nested = 'some-package/node_modules/@ezclassify/types';
+        writeVersion('@ezclassify/types', version);
+        writeVersion(nested, version);
+        expect(auditInstalledPublicDeps(root, version)).toEqual([]);
+
+        writeVersion(nested, '1.0.0-mirror.41.1');
+        expect(() => auditInstalledPublicDeps(root, version)).toThrow(
+            /some-package.*expected 1.0.0-mirror.42.1/,
+        );
+    });
+
     it('rejects a private package at the root of node_modules', () => {
         const root = fixture('@ezclassify/engine');
         expect(auditInstalledPublicDeps(root)).toEqual([
