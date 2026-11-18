@@ -95,12 +95,15 @@ export class RequestBudget {
         start: () => T | PromiseLike<T>,
         describeFailure?: (err: unknown) => unknown,
     ): Promise<T> {
+        let result: T | typeof abortedWork;
         try {
-            return await settleOnAbort(start, this.signal);
+            result = await settleOnAbort(start, this.signal);
         } catch (err: unknown) {
             if (this.signal.aborted) throw this.expired(stage);
             throw describeFailure ? describeFailure(err) : err;
         }
+        if (result === abortedWork) throw this.expired(stage);
+        return result;
     }
 
     /**
@@ -132,6 +135,8 @@ export class RequestBudget {
     }
 }
 
+const abortedWork = Symbol('aborted request work');
+
 /**
  * One request's hold on work that may never settle.
  *
@@ -141,12 +146,12 @@ export class RequestBudget {
  * gave up on it.
  */
 class AbortRace<T> {
-    private _resolve: ((value: T) => void) | null;
+    private _resolve: ((value: T | typeof abortedWork) => void) | null;
     private _reject: ((reason: unknown) => void) | null;
     private _signal: AbortSignal | null;
 
     constructor(
-        resolve: (value: T) => void,
+        resolve: (value: T | typeof abortedWork) => void,
         reject: (reason: unknown) => void,
         signal: AbortSignal,
     ) {
@@ -158,10 +163,12 @@ class AbortRace<T> {
 
     /** The signal aborted first. */
     handleEvent(): void {
-        this.reject(this._signal?.reason);
+        // The caller receives the public timeout or abort error. Settling this
+        // internal promise avoids a second, unhandled report from Zone.js.
+        this.resolve(abortedWork);
     }
 
-    resolve(value: T): void {
+    resolve(value: T | typeof abortedWork): void {
         const resolve = this._resolve;
         this._release();
         resolve?.(value);
@@ -182,22 +189,22 @@ class AbortRace<T> {
 }
 
 /**
- * Settle with the work's outcome or with the signal's abort reason, whichever
+ * Settle with the work's outcome or the abort sentinel, whichever
  * comes first. Work is not started on a signal that has already aborted.
  */
 function settleOnAbort<T>(
     start: () => T | PromiseLike<T>,
     signal: AbortSignal,
-): Promise<T> {
-    if (signal.aborted) return Promise.reject(signal.reason as Error);
+): Promise<T | typeof abortedWork> {
+    if (signal.aborted) return Promise.resolve(abortedWork);
     let work: PromiseLike<T>;
     try {
         work = Promise.resolve(start());
     } catch (err: unknown) {
         return Promise.reject(err as Error);
     }
-    return new Promise<T>((resolve, reject) => {
-        const race = new AbortRace(resolve, reject, signal);
+    return new Promise((resolve, reject) => {
+        const race = new AbortRace<T>(resolve, reject, signal);
         observe(work, race);
         // Starting the work can itself abort the signal, and an abort that
         // already happened never reaches a listener added after it.

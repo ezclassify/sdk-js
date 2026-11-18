@@ -21,7 +21,7 @@ import { SchemeProfileState } from '../src/client-ops';
 import { connectContext } from '../src/connect';
 import { ErrorCodes } from '../src/errors';
 import { mockResponse, stubFetch } from './fetch-mock';
-import { corpusBody } from './contract-fixtures';
+import { corpusBody, fullContextGuideView } from './contract-fixtures';
 
 type Resources = Array<[suffix: string, caseId: string]>;
 
@@ -60,23 +60,29 @@ describe('getFormatCoverage on a Context-bound scheme', () => {
 
     async function connectOver(resources: Resources) {
         fetchMock = stubFetch();
-        fetchMock.mockImplementation((url: string) => {
+        fetchMock.mockImplementation((url: string, init?: RequestInit) => {
             const path = url.split('?')[0] ?? '';
             const resource = resources.find(([suffix]) =>
                 path.endsWith(suffix),
             );
-            const payload = resource
-                ? corpusBody(resource[1])
-                : path.endsWith('/v1/health')
-                  ? { status: 'ok' }
-                  : corpusBody('ctx-describe.ok');
+            const payload = path.endsWith('/v1/ctx/ez-full/1.0.0/guide/view')
+                ? fullContextGuideView(init)
+                : resource
+                  ? corpusBody(resource[1])
+                  : path.endsWith('/v1/health')
+                    ? corpusBody('health.ok')
+                    : corpusBody('ctx-describe.ok');
             return Promise.resolve(mockResponse(200, JSON.stringify(payload)));
         });
-        return connectContext({
+        const client = await connectContext({
             baseUrl: 'https://api.example.com',
             contextId: 'ez-full',
             contextVersion: '1.0.0',
         });
+        expect(client.guide.listGuideMeta().map((guide) => guide.id)).toEqual([
+            'ez-test',
+        ]);
+        return client;
     }
 
     it('reports a category the format never writes, so its concept can be carried', async () => {

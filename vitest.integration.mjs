@@ -12,6 +12,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
     test: {
         root: __dirname,
+        setupFiles: ['./tests/fail-on-console-error.ts'],
         include: ['tests/integration/**/*.spec.ts'],
         environment: 'node',
         globals: false,

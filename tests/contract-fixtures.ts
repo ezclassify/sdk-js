@@ -9,6 +9,7 @@
  */
 
 import { loadWireCorpus } from './wire-corpus';
+import { expect } from 'vitest';
 
 const corpus = loadWireCorpus();
 
@@ -32,4 +33,11 @@ export function corpusBody<T = Record<string, unknown>>(caseId: string): T {
  */
 export function corpusResult<T = Record<string, unknown>>(caseId: string): T {
     return (corpusBody(caseId) as { result: T }).result;
+}
+
+/** Answer the recorded guide warm-up request for the full test Context. */
+export function fullContextGuideView(init: RequestInit | undefined): unknown {
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({ guideId: 'ez-test' });
+    return corpusBody('ctx-guide-view.by-id');
 }

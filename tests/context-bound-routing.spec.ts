@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EzClassifyClient } from '../src/ezclassify-client';
 import { mockResponse, stubFetch } from './fetch-mock';
-import { corpusResult } from './contract-fixtures';
+import { corpusBody, corpusResult } from './contract-fixtures';
 
 function contextEnvelope(result: unknown) {
     return {
@@ -236,10 +236,7 @@ describe('EzClassifyClient: context-bound URL routing', () => {
 
         it('/v1/health stays unprefixed even in context-bound mode', async () => {
             fetchMock.mockResolvedValue(
-                mockResponse(
-                    200,
-                    JSON.stringify({ status: 'ok', engineVersion: '0.1.0' }),
-                ),
+                mockResponse(200, JSON.stringify(corpusBody('health.ok'))),
             );
             const c = new EzClassifyClient('https://api.example.com', {
                 contextId: 'acme-prod-marking',

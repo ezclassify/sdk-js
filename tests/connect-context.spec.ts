@@ -12,7 +12,7 @@ import { EzClassifyError } from '../src/errors';
 import { connectContext } from '../src/connect';
 import { CLIENT_SPEC_VERSION } from '../src/spec-version';
 import { ctxSchemeResourceBody, mockResponse, stubFetch } from './fetch-mock';
-import { corpusResult } from './contract-fixtures';
+import { corpusBody, corpusResult } from './contract-fixtures';
 
 /**
  * What `GET /v1/ctx/acme-prod/1.0.0` answers. A context-bound connect asks for
@@ -49,7 +49,7 @@ function connectBody(url: string): unknown {
     const resource = ctxSchemeResourceBody(url);
     if (resource !== undefined) return resource;
     if (url.includes('/v1/ctx/')) return CTX_DESCRIBE;
-    return { status: 'ok' };
+    return corpusBody('health.ok');
 }
 
 describe('connectContext: named/versioned context connections', () => {
@@ -218,7 +218,10 @@ describe('connectContext: named/versioned context connections', () => {
                 fetchMock.mockImplementation((url: string) => {
                     if (url === 'https://api.example.com/v1/health')
                         return Promise.resolve(
-                            mockResponse(200, JSON.stringify({ status: 'ok' })),
+                            mockResponse(
+                                200,
+                                JSON.stringify(corpusBody('health.ok')),
+                            ),
                         );
                     if (url === held)
                         return Promise.resolve(
@@ -844,14 +847,15 @@ describe('connectContext: named/versioned context connections', () => {
     // -----------------------------------------------------------------------
     describe('version tracking across calls', () => {
         it('ping() returns engineVersion from /v1/health response', async () => {
+            const engineVersion = `${CLIENT_SPEC_VERSION}+test-runtime`;
             fetchMock.mockResolvedValue(
                 mockResponse(
                     200,
                     JSON.stringify({
                         status: 'ok',
-                        engineVersion: '0.1.0',
+                        engineVersion,
                         engineSha: 'abc123',
-                        gitTag: 'v0.1.0',
+                        gitTag: 'test-tag',
                     }),
                 ),
             );
@@ -860,7 +864,11 @@ describe('connectContext: named/versioned context connections', () => {
                 contextVersion: '1.0.0',
             });
             const result = await c.ping();
-            expect(result.engineVersion).toBe('0.1.0');
+            expect(result).toEqual({
+                engineVersion,
+                engineSha: 'abc123',
+                gitTag: 'test-tag',
+            });
         });
 
         it('ping() uses unprefixed /v1/health even in context-bound mode', async () => {
@@ -869,7 +877,7 @@ describe('connectContext: named/versioned context connections', () => {
                     200,
                     JSON.stringify({
                         status: 'ok',
-                        engineVersion: '0.1.0',
+                        engineVersion: CLIENT_SPEC_VERSION,
                         engineSha: '',
                         gitTag: '',
                     }),
