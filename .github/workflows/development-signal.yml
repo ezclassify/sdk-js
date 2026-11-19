@@ -1,0 +1,55 @@
+name: Signal qualified development source
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  signal:
+    if: >-
+      github.repository == 'ezclassify/sdk-js' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: development-signal
+    permissions:
+      actions: read
+    steps:
+      - name: Check full qualification on this attempt
+        id: qualified
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs")
+          full=$(jq -r '.total_count == 2 and (.jobs | length) == 2 and ([.jobs[] | select(.status == "completed" and .conclusion == "success") | .name] | sort) == ["ci","full"]' <<<"$jobs")
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+      - name: Require the configured signal destination
+        if: steps.qualified.outputs.full == 'true'
+        env:
+          DESTINATION: ${{ secrets.EZ_DEVELOPMENT_SIGNAL_DESTINATION }}
+        run: '[[ "$DESTINATION" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]'
+      - id: signal
+        if: steps.qualified.outputs.full == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.EZ_DEVELOPMENT_SIGNAL_APP_ID }}
+          private-key: ${{ secrets.EZ_DEVELOPMENT_SIGNAL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ secrets.EZ_DEVELOPMENT_SIGNAL_DESTINATION }}
+          permission-contents: write
+      - name: Send the development change signal
+        if: steps.qualified.outputs.full == 'true'
+        env:
+          GH_TOKEN: ${{ steps.signal.outputs.token }}
+          DESTINATION: ${{ secrets.EZ_DEVELOPMENT_SIGNAL_DESTINATION }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY_OWNER/$DESTINATION/dispatches" -f event_type=development-producer-changed
