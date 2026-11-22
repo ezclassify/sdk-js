@@ -35,19 +35,16 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Configure package registry
-        # Routes the @ezclassify scope to the GitHub Packages development
-        # mirror, where prerelease builds of the five public contracts packages
-        # this tree installs are published.
-        #
-        # Written to a throwaway user config rather than the repository's
-        # .npmrc, which stays as committed: `ignore-scripts=true` is a project
-        # setting and this file must not disturb it.
-        #
-        # setup-node's own `registry-url`/`scope` inputs are deliberately not
-        # used. They write a second npmrc and export the same
-        # NPM_CONFIG_USERCONFIG this step overwrites, so the pair would be two
-        # lines that look like configuration and change nothing.
+      # The required build and tests use the untouched declared public ranges.
+      # The development mirror is available only under first-publication approval.
+      - name: Install the public registry closure
+        id: public
+        uses: ezclassify/.github/actions/public-npm-dependencies@824b115347abe85905c8b68b2d12f0cf214c5202
+        with:
+          first-publication-packages: ${{ github.repository == 'ezclassify/sdk-js' && vars.EZ_FIRST_PUBLICATION_PACKAGES || '' }}
+
+      - name: Configure the first-publication mirror
+        if: steps.public.outputs.lane == 'bootstrap'
         run: |
           cat > "$RUNNER_TEMP/ci-npmrc" << 'NPMRC'
           @ezclassify:registry=https://npm.pkg.github.com
@@ -57,7 +54,7 @@ jobs:
 
       - name: Resolve declared Contracts dependency
         id: upstream
-        if: github.event_name == 'pull_request'
+        if: steps.public.outputs.lane == 'bootstrap' && github.event_name == 'pull_request'
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
         uses: ezclassify/.github/actions/check-pr-dependencies@7c63d5b73824a37ed06730f43d3c056d19786f7d
@@ -78,7 +75,8 @@ jobs:
       # seven days old, resolves the first-party ones with `--tag=dev`, the tag
       # the mirror publishes every build under, and then runs the portability
       # and dependency-age checks itself.
-      - name: Install
+      - name: Install the first-publication closure
+        if: steps.public.outputs.lane == 'bootstrap'
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
         uses: ezclassify/.github/actions/install-node-dependencies@da1e243029be7e724f808cca11e385e6d79eee8b
@@ -179,9 +177,14 @@ jobs:
         with:
           node-version: '24'
 
-      # Same routing as the ci job: the throwaway user config keeps the
-      # committed .npmrc untouched.
-      - name: Configure package registry
+      - name: Install the public registry closure
+        id: public
+        uses: ezclassify/.github/actions/public-npm-dependencies@824b115347abe85905c8b68b2d12f0cf214c5202
+        with:
+          first-publication-packages: ${{ github.repository == 'ezclassify/sdk-js' && vars.EZ_FIRST_PUBLICATION_PACKAGES || '' }}
+
+      - name: Configure the first-publication mirror
+        if: steps.public.outputs.lane == 'bootstrap'
         run: |
           cat > "$RUNNER_TEMP/ci-npmrc" << 'NPMRC'
           @ezclassify:registry=https://npm.pkg.github.com
@@ -189,7 +192,8 @@ jobs:
           NPMRC
           echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/ci-npmrc" >> "$GITHUB_ENV"
 
-      - name: Install
+      - name: Install the first-publication closure
+        if: steps.public.outputs.lane == 'bootstrap'
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
         uses: ezclassify/.github/actions/install-node-dependencies@da1e243029be7e724f808cca11e385e6d79eee8b
