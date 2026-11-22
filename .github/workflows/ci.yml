@@ -39,7 +39,7 @@ jobs:
       # The development mirror is available only under first-publication approval.
       - name: Install the public registry closure
         id: public
-        uses: ezclassify/.github/actions/public-npm-dependencies@824b115347abe85905c8b68b2d12f0cf214c5202
+        uses: ezclassify/.github/actions/public-npm-dependencies@d71909714a08e9a2c60e0d987ecffa03419f73e8
         with:
           first-publication-packages: ${{ github.repository == 'ezclassify/sdk-js' && vars.EZ_FIRST_PUBLICATION_PACKAGES || '' }}
 
@@ -57,7 +57,7 @@ jobs:
         if: steps.public.outputs.lane == 'bootstrap' && github.event_name == 'pull_request'
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
-        uses: ezclassify/.github/actions/check-pr-dependencies@7c63d5b73824a37ed06730f43d3c056d19786f7d
+        uses: ezclassify/.github/actions/check-pr-dependencies@d71909714a08e9a2c60e0d987ecffa03419f73e8
         with:
           producer: ezclassify/contracts
           packages: '@ezclassify/types @ezclassify/tsconfig @ezclassify/openapi @ezclassify/conformance @ezclassify/conformance-server'
@@ -179,7 +179,7 @@ jobs:
 
       - name: Install the public registry closure
         id: public
-        uses: ezclassify/.github/actions/public-npm-dependencies@824b115347abe85905c8b68b2d12f0cf214c5202
+        uses: ezclassify/.github/actions/public-npm-dependencies@d71909714a08e9a2c60e0d987ecffa03419f73e8
         with:
           first-publication-packages: ${{ github.repository == 'ezclassify/sdk-js' && vars.EZ_FIRST_PUBLICATION_PACKAGES || '' }}
 
