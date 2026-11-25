@@ -7,7 +7,7 @@
         "type": "git",
         "url": "git+https://github.com/ezclassify/sdk-js.git"
     },
-    "homepage": "https://ezclassify.com/docs/integrating",
+    "homepage": "https://ezclassify.com/",
     "bugs": {
         "url": "https://github.com/ezclassify/sdk-js/issues"
     },
