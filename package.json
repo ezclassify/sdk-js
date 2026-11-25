@@ -65,7 +65,10 @@
         "portion-mark",
         "banner-line",
         "library",
-        "sdk"
+        "sdk",
+        "module",
+        "package",
+        "api"
     ],
     "scripts": {
         "build": "node scripts/generate-spec-version.mjs && node scripts/generate-response-shapes.mjs && vite build",
