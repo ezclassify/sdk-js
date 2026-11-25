@@ -61,7 +61,9 @@
         "need-to-know",
         "access-control",
         "abac",
-        "releasability"
+        "releasability",
+        "portion-mark",
+        "banner-line"
     ],
     "scripts": {
         "build": "node scripts/generate-spec-version.mjs && node scripts/generate-response-shapes.mjs && vite build",
