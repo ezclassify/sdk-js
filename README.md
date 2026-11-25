@@ -5,11 +5,20 @@
 [![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933.svg)](package.json)
 
-Typed HTTP client for a running EzClassify REST deployment. It covers the
-scheme, guide, access and composed-context operations, and it ships no engine.
+TypeScript client for the EzClassify REST API. It parses and validates
+security markings and sensitivity labels, combines portion marks into an
+overall marking, and checks who may access a marked document. It works with
+IC Classification and Control Markings (CAPCO), Controlled Unclassified
+Information (CUI), Traffic Light Protocol (TLP) 2.0, Common Vulnerability
+Scoring System (CVSS), or rules you write yourself.
 
-Classification, marking, and access decisions run on the server. Use this
-client from a Node.js application, browser, or edge runtime with `fetch`.
+It needs a running EzClassify runtime and ships no engine. Classification,
+marking, and access decisions run on the server. The free developer runtime
+carries TLP 2.0, CVSS, and demo subsets of CAPCO and CUI. The full CAPCO and
+CUI schemes are licensed content. Use this client from a Node.js application,
+browser, or edge runtime with `fetch`.
+
+It covers the scheme, guide, access and composed-context operations.
 
 The [ezclassify/contracts](https://github.com/ezclassify/contracts) repository owns
 document and wire types; the
@@ -69,6 +78,44 @@ INTERNAL true
 synthetic markings with it. `GET /v1/ctx` on the runtime lists every built-in
 Context. A browser application on another origin needs that origin in the
 runtime's `EZCLASSIFY_DEMO_ALLOWED_ORIGINS` setting.
+
+### Validate, roll up, and check access
+
+The `capco-demo` Context on the developer runtime carries a demo subset of
+CAPCO:
+
+```js
+import { connectContext } from '@ezclassify/rest-client';
+
+const client = await connectContext({
+    baseUrl: 'http://localhost:3000',
+    contextId: 'capco-demo',
+    contextVersion: '1.0.0',
+});
+
+try {
+    const read = await client.scheme.validate('SECRET//NOFORN');
+    console.log(read.rendered, read.valid); // SECRET//NOFORN true
+
+    const overall = await client.scheme.aggregate([
+        'SECRET//REL TO USA, GBR, CAN',
+        'CONFIDENTIAL//REL TO USA, GBR',
+        'UNCLASSIFIED',
+    ]);
+    console.log(overall.rendered); // SECRET//REL TO USA, GBR
+
+    const decision = await client.context.checkAccess('SECRET//NOFORN', {
+        clearance: 'SECRET',
+        nationality: 'GBR',
+    });
+    console.log(decision.result.granted); // false
+} finally {
+    client.destroy();
+}
+```
+
+The access policy in the demo Context is notional. It denies this user
+because the NOFORN rule asks for a USA nationality claim.
 
 ### Swap to your runtime
 
