@@ -5,7 +5,7 @@
 [![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933.svg)](package.json)
 
-TypeScript client for the EzClassify REST API. It parses and validates
+TypeScript client library for the EzClassify REST API. It parses and validates
 security markings and sensitivity labels, combines portion marks into an
 overall marking, and checks who may access a marked document. It works with
 IC Classification and Control Markings (CAPCO), Controlled Unclassified
