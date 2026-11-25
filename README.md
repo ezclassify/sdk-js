@@ -5,18 +5,20 @@
 [![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js 22 | 24](https://img.shields.io/badge/node-22%20%7C%2024-339933.svg)](package.json)
 
-TypeScript client library for the EzClassify REST API. It parses and validates
-security markings and sensitivity labels, combines portion marks into an
-overall marking, and checks who may access a marked document. It works with
-IC Classification and Control Markings (CAPCO), Controlled Unclassified
-Information (CUI), Traffic Light Protocol (TLP) 2.0, Common Vulnerability
-Scoring System (CVSS), or rules you write yourself.
+TypeScript client library for the EzClassify REST API, installed as an npm
+package. It is a classification marking parser, validator and rollup with
+need-to-know access checks: it validates security markings and sensitivity
+labels, combines portion marks into an overall marking, and checks who may
+access a marked document. It works with IC Classification and Control
+Markings (CAPCO), Controlled Unclassified Information (CUI), Traffic Light
+Protocol (TLP) 2.0, Common Vulnerability Scoring System (CVSS), or marking
+rules you write yourself. It needs a running EzClassify runtime. The free
+developer runtime includes TLP 2.0, CVSS and demo subsets of CAPCO and CUI;
+the full CAPCO and CUI schemes are licensed content.
 
-It needs a running EzClassify runtime and ships no engine. Classification,
-marking, and access decisions run on the server. The free developer runtime
-carries TLP 2.0, CVSS, and demo subsets of CAPCO and CUI. The full CAPCO and
-CUI schemes are licensed content. Use this client from a Node.js application,
-browser, or edge runtime with `fetch`.
+It ships no engine; classification, marking, and access decisions run on the
+server. Use it from a Node.js application, browser, or edge runtime with
+`fetch`.
 
 It covers the scheme, guide, access and composed-context operations.
 
